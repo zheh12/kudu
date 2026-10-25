@@ -1,0 +1,444 @@
+<title>Kudu Security Tutorial</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column; wide figures scroll inside their own frame on phones.
+   Palette is keyed to the roles in the system: client (ochre), master (indigo), tablet server (teal), Raft/WAL (rust), disk (slate). */
+:root {
+  --bg: #f4f7f8; --surf: #ffffff; --fg: #14212b; --muted: #55646e; --line: #d0d9df; --line2: #8fa0ab;
+  --client: #a9680f; --client-t: #fbeed6;
+  --master: #4a4db8; --master-t: #e6e7fa;
+  --ts: #0d7566; --ts-t: #d9f1ed;
+  --raft: #bb4a22; --raft-t: #fae3d9;
+  --disk: #52646f; --disk-t: #e6ecef;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+    --client: #e3ad50; --client-t: #3a2f17;
+    --master: #a1a3f5; --master-t: #25284d;
+    --ts: #4fc9b4; --ts-t: #11322d;
+    --raft: #f2905f; --raft-t: #3d2218;
+    --disk: #a3b4bf; --disk-t: #22323c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+  --client: #e3ad50; --client-t: #3a2f17;
+  --master: #a1a3f5; --master-t: #25284d;
+  --ts: #4fc9b4; --ts-t: #11322d;
+  --raft: #f2905f; --raft-t: #3d2218;
+  --disk: #a3b4bf; --disk-t: #22323c;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.65 var(--body);
+  padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.prose { max-width: 68ch; display: flex; flex-direction: column; gap: 12px; }
+p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.1rem; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+code { font: 500 .88em var(--mono); background: var(--disk-t); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--master); }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { background: var(--surf); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { font-size: .92rem; color: var(--muted); max-width: 78ch; }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.role { background: var(--surf); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role h3 { color: var(--c); }
+.role p, .role li { font-size: .95rem; }
+.role ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; max-width: 76ch; }
+.note { border-left: 3px solid var(--raft); padding: 4px 0 4px 14px; color: var(--muted); max-width: 68ch; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font: 500 13px var(--mono); text-decoration: none; color: var(--fg); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+/* SVG vocabulary */
+svg text { font-family: var(--body); fill: var(--fg); font-size: 13px; }
+svg .t { font-weight: 600; }
+svg .s { font-size: 11.5px; fill: var(--muted); }
+svg .m { font-family: var(--mono); font-size: 11.5px; }
+svg .h { paint-order: stroke; stroke: var(--surf); stroke-width: 5px; stroke-linejoin: round; }
+svg .c { text-anchor: middle; }
+svg .e { text-anchor: end; }
+svg .box { fill: var(--surf); stroke: var(--line2); stroke-width: 1.4; }
+svg .grp { fill: none; stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .b-client { fill: var(--client-t); stroke: var(--client); stroke-width: 1.5; }
+svg .b-master { fill: var(--master-t); stroke: var(--master); stroke-width: 1.5; }
+svg .b-ts { fill: var(--ts-t); stroke: var(--ts); stroke-width: 1.5; }
+svg .b-raft { fill: var(--raft-t); stroke: var(--raft); stroke-width: 1.5; }
+svg .b-disk { fill: var(--disk-t); stroke: var(--disk); stroke-width: 1.5; }
+svg .solid-ts { fill: var(--ts); stroke: var(--ts); }
+svg .solid-ts + text, svg text.on { fill: var(--surf); }
+svg .ln { fill: none; stroke: currentColor; stroke-width: 1.5; }
+svg .ln-r { fill: none; stroke: var(--raft); stroke-width: 1.6; stroke-dasharray: 6 4; }
+svg .ln-d { fill: none; stroke: var(--line2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+svg .life { stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 3 5; }
+</style>
+
+<main>
+  <header class="prose">
+    <span class="eyebrow">Learning Kudu · Part 9</span>
+    <h1>Security: identity, secrecy and permission</h1>
+    <p class="lede">Kudu has a complete set of security controls: Kerberos and token-based authentication, TLS encryption, access lists, Apache Ranger policies and encryption at rest. This part shows how they fit together. It starts with one fact that shapes the rest: <strong>most of them are off, or permissive, by default.</strong> A freshly started cluster expects to live on a trusted network.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#defaults">Defaults</a><a href="#creds">Credentials</a><a href="#trust">Bootstrapping trust</a><a href="#authn">Authentication</a><a href="#tokens">Tokens</a><a href="#acl">Coarse ACLs</a><a href="#ranger">Ranger</a><a href="#rest">At rest</a><a href="#surfaces">Other surfaces</a><a href="#check">Checklist</a>
+    </nav>
+  </header>
+
+  <section id="defaults">
+    <h2>The layers, and what each one does out of the box</h2>
+    <div class="prose">
+      <p>Think of security as five questions: <em>who are you</em>, <em>can anyone listen in</em>, <em>are you allowed</em>, <em>can someone read the disk</em>, and <em>what else can I see</em>. Kudu answers each with a separate switch. The project's own threat model (<code>THREAT_MODEL.md</code>, still a draft awaiting maintainer review) states the posture directly: Kudu is designed to run inside a trusted cluster network, and the operator is expected to turn enforcement on.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 520" role="img" aria-label="Table of six security layers with the default setting, the secure setting, and what is exposed if the default is left.">
+        <text class="t" x="20" y="24">Question</text><text class="t" x="230" y="24">Default</text><text class="t" x="450" y="24">Secure setting</text><text class="t" x="700" y="24">If you leave the default</text>
+        <path class="life" d="M20 34 H 960"/>
+        <g>
+          <rect class="b-master" x="20" y="44" width="200" height="62" rx="5"/><text class="t" x="32" y="66">Who are you?</text><text class="s" x="32" y="86">authentication</text>
+          <text class="m" x="230" y="64">--rpc_authentication=optional</text><text class="s" x="230" y="84" fill="var(--raft)">identity is used if offered</text>
+          <text class="m" x="450" y="64">=required</text><text class="s" x="450" y="84">+ Kerberos keytabs on servers</text>
+          <text class="s" x="700" y="64">a client from a private network can</text><text class="s" x="700" y="80">connect with any user name it claims</text>
+
+          <rect class="b-master" x="20" y="116" width="200" height="62" rx="5"/><text class="t" x="32" y="138">Can anyone listen?</text><text class="s" x="32" y="158">encryption in transit</text>
+          <text class="m" x="230" y="136">--rpc_encryption=optional</text><text class="s" x="230" y="156" fill="var(--raft)">TLS if both sides support it</text>
+          <text class="m" x="450" y="136">=required</text><text class="s" x="450" y="156">loopback traffic stays plain by default</text>
+          <text class="s" x="700" y="136">a client or server without TLS can</text><text class="s" x="700" y="152">still connect; data may be in clear</text>
+
+          <rect class="b-master" x="20" y="188" width="200" height="62" rx="5"/><text class="t" x="32" y="210">Are you allowed?</text><text class="s" x="32" y="230">coarse access lists</text>
+          <text class="m" x="230" y="208">--user_acl=*</text><text class="s" x="230" y="228" fill="var(--raft)">every authenticated user</text>
+          <text class="m" x="450" y="208">--user_acl=alice,etl</text><text class="s" x="450" y="228">--superuser_acl=admin</text>
+          <text class="s" x="700" y="208">any identity that gets in has full</text><text class="s" x="700" y="224">read and write on all tables</text>
+
+          <rect class="b-master" x="20" y="260" width="200" height="62" rx="5"/><text class="t" x="32" y="282">Which tables?</text><text class="s" x="32" y="302">fine-grained policy</text>
+          <text class="m" x="230" y="280">no Ranger</text><text class="s" x="230" y="300" fill="var(--raft)">no table or column rules</text>
+          <text class="m" x="450" y="280">Ranger + enforcement</text><text class="s" x="450" y="300">--tserver_enforce_access_control</text>
+          <text class="s" x="700" y="280">authorization is all-or-nothing for</text><text class="s" x="700" y="296">users on the ACL</text>
+
+          <rect class="b-master" x="20" y="332" width="200" height="62" rx="5"/><text class="t" x="32" y="354">Can they read the disk?</text><text class="s" x="32" y="374">encryption at rest</text>
+          <text class="m" x="230" y="352">--encrypt_data_at_rest=false</text><text class="s" x="230" y="372" fill="var(--raft)">files are plain</text>
+          <text class="m" x="450" y="352">=true + Ranger KMS</text><text class="s" x="450" y="372">new clusters only</text>
+          <text class="s" x="700" y="352">anyone with the disk or a backup</text><text class="s" x="700" y="368">reads the data</text>
+
+          <rect class="b-master" x="20" y="404" width="200" height="62" rx="5"/><text class="t" x="32" y="426">What else is visible?</text><text class="s" x="32" y="446">web UI, logs</text>
+          <text class="m" x="230" y="424">--redact=all, web UI on</text><text class="s" x="230" y="444" fill="var(--ts)">row data is hidden</text>
+          <text class="m" x="450" y="424">HTTPS, SPNEGO, or off</text><text class="s" x="450" y="444">limit access to the UI ports</text>
+          <text class="s" x="700" y="424">schema, metrics and cluster state</text><text class="s" x="700" y="440">are visible to anyone who can connect</text>
+        </g>
+        <text class="s" x="20" y="500">Row data is the one thing that is safe by default (redacted). Everything else needs a decision from the operator.</text>
+      </svg>
+      </div>
+      <figcaption>A word about "optional". It means "authenticate if the other side can, otherwise carry on". It does not mean "authentication is available but off". Operators often read it as protection, and the threat model lists this misreading first among the known misuse patterns.</figcaption>
+    </figure>
+  </section>
+
+  <section id="creds">
+    <h2>Who proves what to whom</h2>
+    <div class="prose">
+      <p>A secure Kudu cluster uses <strong>three kinds of credential</strong>, chosen so that the Kerberos server is contacted rarely. People and services start with Kerberos. After that, Kudu's own machinery takes over.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 440" role="img" aria-label="Clients and servers with the credential used on each connection: Kerberos to reach the master first, authentication tokens afterwards, internal X.509 certificates between servers, and authorization tokens for table privileges.">
+        <defs><marker id="i1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-client" x="20" y="150" width="190" height="90" rx="6"/><text class="t" x="34" y="176">Client / Spark / Impala</text><text class="s" x="34" y="196">Kerberos ticket from kinit,</text><text class="s" x="34" y="212">then a token it is handed</text>
+        <rect class="b-master" x="380" y="30" width="220" height="100" rx="6"/><text class="t" x="394" y="56">Master (leader)</text><text class="s" x="394" y="76">internal certificate authority</text><text class="s" x="394" y="92">token signing keys</text><text class="s" x="394" y="108">asks Ranger (optional)</text>
+        <rect class="b-ts" x="380" y="260" width="220" height="90" rx="6"/><text class="t" x="394" y="286">Tablet server</text><text class="s" x="394" y="306">holds public token keys</text><text class="s" x="394" y="322">checks tokens, never asks a KDC</text>
+        <rect class="b-ts" x="740" y="260" width="220" height="90" rx="6"/><text class="t" x="754" y="286">Another tablet server</text><text class="s" x="754" y="306">Raft peer, tablet copy source</text>
+        <rect class="b-disk" x="740" y="40" width="220" height="80" rx="6"/><text class="t" x="754" y="66">Kerberos KDC, Ranger,</text><text class="t" x="754" y="82">KMS</text><text class="s" x="754" y="102">external, run by the operator</text>
+
+        <path class="ln" marker-end="url(#i1)" d="M210 170 C 300 120, 320 100, 378 92"/><text class="s h" x="236" y="104">① Kerberos (SASL GSSAPI)</text><text class="s h" x="236" y="120">first time only</text>
+        <path class="ln-d" marker-end="url(#i1)" d="M378 118 C 320 140, 300 170, 212 186"/>
+        <path class="ln" marker-end="url(#i1)" d="M210 222 C 300 260, 330 290, 378 296"/><text class="s h" x="226" y="262">② auth token + TLS;</text><text class="s h" x="226" y="278">authz token per table</text>
+        <path class="ln" marker-end="url(#i1)" d="M600 306 H 738"/><path class="ln" marker-end="url(#i1)" d="M738 322 H 602"/><text class="s h c" x="670" y="298">③ certificates</text>
+        <path class="ln" marker-end="url(#i1)" d="M490 258 V 132"/><text class="s h" x="498" y="200">④ heartbeats: server sends a CSR,</text><text class="s h" x="498" y="216">master returns a signed certificate</text><text class="s h" x="498" y="232">and public token keys</text>
+        <path class="ln-d" marker-end="url(#i1)" d="M600 80 H 738"/><text class="s h c" x="670" y="72">⑤ checks</text>
+        <rect class="b-disk" x="20" y="376" width="940" height="52" rx="6"/><text class="s" x="34" y="398">Key idea: Kerberos proves identity once. The master turns that into a token (for a person) or a certificate (for a server). Every later connection uses those, and a tablet server can verify</text><text class="s" x="34" y="414">them locally with a public key, which is how Kudu scales to thousands of nodes without overloading the KDC.</text>
+      </svg>
+      </div>
+      <figcaption>Kudu does not accept externally issued certificates for its own internal connections. The internal PKI is the only supported source of server certificates, and the master's root CA lives in the <code>sys.catalog</code> table from Part 3.</figcaption>
+    </figure>
+  </section>
+
+  <section id="trust">
+    <h2>How trust is bootstrapped</h2>
+    <div class="prose">
+      <p>The first time a server or client appears, it has nothing but a Kerberos identity. Here is how it ends up with Kudu credentials. Nothing is installed by hand on each node: the cluster hands out its own certificates through the heartbeat and connect paths you already know.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 560" role="img" aria-label="Sequence: leader master creates its CA and token keys; a tablet server authenticates with its keytab over SASL, sends a CSR in a heartbeat, receives a signed certificate, the CA certificate and public token keys; a client with a Kerberos ticket connects to the master and receives the CA certificate and an authentication token.">
+        <defs><marker id="i2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-ts" x="40" y="8" width="170" height="36" rx="6"/><text class="t c" x="125" y="31">Tablet server</text>
+        <rect class="b-master" x="400" y="8" width="170" height="36" rx="6"/><text class="t c" x="485" y="31">Master (leader)</text>
+        <rect class="b-client" x="770" y="8" width="170" height="36" rx="6"/><text class="t c" x="855" y="31">Client</text>
+        <path class="life" d="M125 44 V550 M485 44 V550 M855 44 V550"/>
+
+        <rect class="b-master" x="300" y="60" width="370" height="50" rx="5"/><text class="s" x="310" y="80">① On election, the leader loads or creates its root CA key and</text><text class="s" x="310" y="96">certificate, and the token signing keys; stored in sys.catalog</text>
+        <rect class="b-ts" x="30" y="130" width="250" height="44" rx="5"/><text class="s" x="40" y="150">② starts with a Kerberos keytab and makes a</text><text class="s" x="40" y="166">private key and a certificate request (CSR)</text>
+        <path class="ln" marker-end="url(#i2)" d="M125 196 H 483"/><text class="s h" x="135" y="188">③ heartbeat over SASL GSSAPI (the keytab identity) + CSR</text>
+        <text class="s" x="135" y="214">(the heartbeat carries the CSR)</text>
+        <rect class="b-master" x="330" y="256" width="310" height="44" rx="5"/><text class="s" x="340" y="276">④ master checks the caller is a service user and signs</text><text class="s" x="340" y="292">the CSR with its CA key</text>
+        <path class="ln-d" marker-end="url(#i2)" d="M483 322 H 127"/><text class="s h" x="150" y="314">⑤ reply: signed certificate, CA certificate, public token keys</text>
+        <rect class="b-ts" x="30" y="336" width="250" height="40" rx="5"/><text class="s" x="40" y="356">⑥ trusts the CA, adopts its certificate;</text><text class="s" x="40" y="370">later connections use TLS certificates</text>
+
+        <path class="ln" marker-end="url(#i2)" d="M855 408 H 487"/><text class="s h" x="520" y="400">⑦ ConnectToMaster, SASL GSSAPI with a Kerberos ticket, over TLS</text>
+        <rect class="b-master" x="330" y="420" width="310" height="52" rx="5"/><text class="s" x="340" y="440">⑧ master replies with its CA certificate and a signed</text><text class="s" x="340" y="456">authentication token (7 days), but only on a confidential channel</text>
+        <path class="ln-d" marker-end="url(#i2)" d="M485 488 H 853"/><text class="s h" x="560" y="480">⑨ CA certificate + authentication token</text>
+        <text class="s" x="520" y="520">The client keeps the token and uses it on later connections.</text><text class="s" x="520" y="536">A token is not used to mint a new token: renewal needs Kerberos again.</text>
+      </svg>
+      </div>
+      <figcaption>Steps ③ to ⑥ are the reason a tablet server needs a keytab only to join the cluster. The master issues an authentication token (⑧) only over a confidential channel, and not to a caller who itself came in with a token, so a stolen token cannot be turned into a longer-lived one.</figcaption>
+    </figure>
+  </section>
+
+  <section id="authn">
+    <h2>Authentication at connection time</h2>
+    <div class="prose">
+      <p>Part 2 showed the negotiation steps. Here is the security meaning of the choices. The server picks one mechanism per connection, strongest first: a client certificate, then an authentication token, then Kerberos (or JWT where configured), and as a last resort SASL <strong>PLAIN</strong>. PLAIN carries no proof at all: the server <em>accepts any user name</em>.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 420" role="img" aria-label="Matrix: rows are a client with Kerberos, token or certificate, a client with no credentials from a trusted private network, and one from a public address; columns are rpc_authentication disabled, optional and required, with the result in each cell.">
+        <text class="t c" x="360" y="26">--rpc_authentication=</text>
+        <text class="m c" x="340" y="52">disabled</text><text class="m c" x="570" y="52">optional (default)</text><text class="m c" x="800" y="52">required</text>
+        <g>
+          <rect class="b-master" x="20" y="64" width="200" height="86" rx="5"/><text class="t" x="32" y="88">Client with real</text><text class="t" x="32" y="104">credentials</text><text class="s" x="32" y="126">Kerberos, token or</text><text class="s" x="32" y="140">certificate</text>
+          <rect class="b-raft" x="230" y="64" width="220" height="86" rx="5"/><text class="t" x="242" y="88">Not authenticated</text><text class="s" x="242" y="108">the server does no check; the</text><text class="s" x="242" y="124">user is whatever name is sent</text>
+          <rect class="b-ts" x="460" y="64" width="220" height="86" rx="5"/><text class="t" x="472" y="88">Authenticated</text><text class="s" x="472" y="108">strong mechanism is used, the</text><text class="s" x="472" y="124">user name is verified</text>
+          <rect class="b-ts" x="690" y="64" width="270" height="86" rx="5"/><text class="t" x="702" y="88">Authenticated</text><text class="s" x="702" y="108">same as optional</text>
+
+          <rect class="b-master" x="20" y="160" width="200" height="86" rx="5"/><text class="t" x="32" y="184">No credentials, from a</text><text class="t" x="32" y="200">private network</text><text class="s" x="32" y="222">10.x, 172.16.x, 192.168.x,</text><text class="s" x="32" y="236">loopback, local subnets</text>
+          <rect class="b-raft" x="230" y="160" width="220" height="86" rx="5"/><text class="t" x="242" y="184">Accepted, unverified</text><text class="s" x="242" y="204">PLAIN: the claimed name is</text><text class="s" x="242" y="220">the identity (and may be on</text><text class="s" x="242" y="236">the ACL)</text>
+          <rect class="b-raft" x="460" y="160" width="220" height="86" rx="5"/><text class="t" x="472" y="184">Accepted, unverified</text><text class="s" x="472" y="204">PLAIN again. This is why</text><text class="s" x="472" y="220">"optional" is not protection</text>
+          <rect class="b-ts" x="690" y="160" width="270" height="86" rx="5"/><text class="t" x="702" y="184">Rejected</text><text class="s" x="702" y="204">PLAIN is not offered, so the</text><text class="s" x="702" y="220">client cannot connect</text>
+
+          <rect class="b-master" x="20" y="256" width="200" height="86" rx="5"/><text class="t" x="32" y="280">No credentials, from a</text><text class="t" x="32" y="296">public address</text><text class="s" x="32" y="318">anything outside the trusted</text><text class="s" x="32" y="332">subnets</text>
+          <rect class="b-ts" x="230" y="256" width="220" height="86" rx="5"/><text class="t" x="242" y="280">Rejected</text><text class="s" x="242" y="300">"unauthenticated connections</text><text class="s" x="242" y="316">from publicly routable IPs</text><text class="s" x="242" y="332">are prohibited"</text>
+          <rect class="b-ts" x="460" y="256" width="220" height="86" rx="5"/><text class="t" x="472" y="280">Rejected</text><text class="s" x="472" y="300">same rule</text>
+          <rect class="b-ts" x="690" y="256" width="270" height="86" rx="5"/><text class="t" x="702" y="280">Rejected</text>
+        </g>
+        <rect class="b-client" x="20" y="356" width="940" height="52" rx="6"/><text class="s" x="34" y="378">The "trusted subnets" list (--trusted_subnets) is the only thing between the middle row and the bottom row. Setting it to 0.0.0.0/0 opens the unverified path to every address.</text><text class="s" x="34" y="396">Network placement and firewalls are therefore part of the security model whenever authentication is not "required".</text>
+      </svg>
+      </div>
+      <figcaption>The identity on a PLAIN connection is a claim, not a fact. Every later check (user ACL, superuser ACL, the table owner in Ranger) trusts that claim. This is why the threat model treats a reachable, optional-authentication cluster as out of scope for authentication properties.</figcaption>
+    </figure>
+  </section>
+
+  <section id="tokens">
+    <h2>Tokens: how a signature stands in for the KDC</h2>
+    <div class="prose">
+      <p>The master signs two kinds of token with a private key. Everyone else holds only the public part and can verify without calling anyone. The private keys rotate daily, and the public parts are sent out ahead of time, so rotation never breaks a token.</p>
+    </div>
+    <figure>
+      <div class="frame">
+<svg viewBox="0 0 980 400" role="img" aria-label="Timeline in days of three token signing keys, each created one day apart, with propagation, active and inactive phases and expiry after nine days, plus the seven day authentication token and five minute authorization token lifetimes, drawn to scale.">
+<text class="s" x="20" y="22">TOKEN SIGNING KEYS (TSK), ONE NEW KEY PER DAY, EACH VALID FOR 9 DAYS. DRAWN TO SCALE.</text>
+<path d="M140.0 40 V 300" class="life"/><text class="s c" x="140.0" y="316">day 0</text>
+<path d="M212.7 40 V 300" class="life"/><text class="s c" x="212.7" y="316">day 1</text>
+<path d="M285.5 40 V 300" class="life"/><text class="s c" x="285.5" y="316">day 2</text>
+<path d="M358.2 40 V 300" class="life"/><text class="s c" x="358.2" y="316">day 3</text>
+<path d="M430.9 40 V 300" class="life"/><text class="s c" x="430.9" y="316">day 4</text>
+<path d="M503.6 40 V 300" class="life"/><text class="s c" x="503.6" y="316">day 5</text>
+<path d="M576.4 40 V 300" class="life"/><text class="s c" x="576.4" y="316">day 6</text>
+<path d="M649.1 40 V 300" class="life"/><text class="s c" x="649.1" y="316">day 7</text>
+<path d="M721.8 40 V 300" class="life"/><text class="s c" x="721.8" y="316">day 8</text>
+<path d="M794.5 40 V 300" class="life"/><text class="s c" x="794.5" y="316">day 9</text>
+<path d="M867.3 40 V 300" class="life"/><text class="s c" x="867.3" y="316">day 10</text>
+<path d="M940.0 40 V 300" class="life"/><text class="s c" x="940.0" y="316">day 11</text>
+<text class="t" x="20" y="74">TSK 1</text>
+<rect class="b-disk" x="140.0" y="52" width="72.7" height="30" rx="2" style="fill-opacity:.5"/>
+<rect class="b-ts" x="212.7" y="52" width="72.7" height="30" rx="2"/>
+<rect class="b-disk" x="285.5" y="52" width="509.1" height="30" rx="2" style="fill-opacity:.25"/>
+<text class="s c" x="176.4" y="71">spread</text><text class="s c" x="249.1" y="71">signing</text><text class="s c" x="540.0" y="71">still verifies tokens it signed, then expires</text>
+<text class="t" x="20" y="136">TSK 2</text>
+<rect class="b-disk" x="212.7" y="114" width="72.7" height="30" rx="2" style="fill-opacity:.5"/>
+<rect class="b-ts" x="285.5" y="114" width="72.7" height="30" rx="2"/>
+<rect class="b-disk" x="358.2" y="114" width="509.1" height="30" rx="2" style="fill-opacity:.25"/>
+<text class="t" x="20" y="198">TSK 3</text>
+<rect class="b-disk" x="285.5" y="176" width="72.7" height="30" rx="2" style="fill-opacity:.5"/>
+<rect class="b-ts" x="358.2" y="176" width="72.7" height="30" rx="2"/>
+<rect class="b-disk" x="430.9" y="176" width="509.1" height="30" rx="2" style="fill-opacity:.25"/>
+<text class="t" x="20" y="268">a token</text>
+<rect class="b-client" x="212.7" y="252" width="509.1" height="22" rx="2"/><text class="s c" x="467.3" y="268">authentication token: valid 7 days (signed on day 1, expires day 8)</text>
+<rect class="b-raft" x="212.7" y="280" width="3" height="14" rx="1"/><text class="s" x="222.7" y="292">authorization token: 5 minutes (too small to draw at this scale)</text>
+<rect class="b-master" x="20" y="330" width="940" height="58" rx="6"/><text class="s" x="34" y="352">A key is only used to sign after it has had a full day to reach every server (tablet servers get public keys in heartbeat replies). Validity = 2 x rotation + the longer</text><text class="s" x="34" y="370">token lifetime = 2 + 7 = 9 days, so any token signed by the key can still be checked until it expires. Tokens are RSA-signed (2048-bit keys by default).</text>
+</svg>
+      </div>
+      <figcaption>Two different tokens exist. An <strong>authentication token</strong> (7 days) says "this is user alice". An <strong>authorization token</strong> (5 minutes) says "alice may insert and scan these columns of table T" and is described below. Short lifetimes bound the damage of a stolen token. Tokens are only valid over TLS.</figcaption>
+    </figure>
+  </section>
+
+  <section id="acl">
+    <h2>Coarse permission: the ACLs</h2>
+    <div class="prose">
+      <p>Once a user is identified, each RPC handler asks <code>ServerBase::Authorize</code> whether that user holds one of the roles the method accepts. There are three roles. Each is an access list of user names, with <code>*</code> meaning "any authenticated user".</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 520" role="img" aria-label="Three roles: superuser, user and service user, which methods each may call on masters and tablet servers, and the flags that define them.">
+        <defs><marker id="i3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-raft" x="20" y="20" width="300" height="130" rx="6"/><text class="t" x="34" y="44">Superuser</text><text class="m" x="34" y="64">--superuser_acl</text><text class="s" x="34" y="86">default: the daemon's own identity</text><text class="s" x="34" y="104">(the local user running it)</text><text class="s" x="34" y="128">operators: kudu CLI repair and diagnosis</text>
+        <rect class="b-ts" x="340" y="20" width="300" height="130" rx="6"/><text class="t" x="354" y="44">User</text><text class="m" x="354" y="64">--user_acl</text><text class="s" x="354" y="86" fill="var(--raft)">default: *  (every authenticated user)</text><text class="s" x="354" y="108">applications: create, alter, drop</text><text class="s" x="354" y="124">tables; read and write rows</text>
+        <rect class="b-master" x="660" y="20" width="300" height="130" rx="6"/><text class="t" x="674" y="44">Service user</text><text class="s" x="674" y="66">not configurable by list: it is the</text><text class="s" x="674" y="82">identity of the daemons themselves,</text><text class="s" x="674" y="98">taken from the keytab or login user</text><text class="s" x="674" y="122">servers calling servers</text>
+
+        <text class="t" x="20" y="186">Which role each call needs</text>
+        <rect class="b-disk" x="20" y="198" width="940" height="262" rx="6"/>
+        <text class="t" x="34" y="222">Master</text>
+        <text class="s" x="34" y="242">· CreateTable, AlterTable, GetTableLocations, GetTableSchema, ConnectToMaster</text><text class="s" x="600" y="242">superuser, user or service user</text>
+        <text class="s" x="34" y="262">· DeleteTable, ListTabletServers, ListMasters</text><text class="s" x="600" y="262">superuser or user</text>
+        <text class="s" x="34" y="282">· TSHeartbeat (also signs CSRs)</text><text class="s" x="600" y="282">service user only: not even a superuser</text>
+        <text class="s" x="34" y="302">· RemoveMaster, ReplaceTablet, ChangeTServerState, UnregisterTServer</text><text class="s" x="600" y="302">superuser only</text>
+        <text class="t" x="34" y="338">Tablet server</text>
+        <text class="s" x="34" y="358">· Write, Scan, ScannerKeepAlive</text><text class="s" x="600" y="358">superuser or user</text>
+        <text class="s" x="34" y="378">· CreateTablet, DeleteTablet, AlterSchema (from the master)</text><text class="s" x="600" y="378">superuser or service user</text>
+        <text class="s" x="34" y="398">· UpdateConsensus, RequestVote, tablet copy (from peers)</text><text class="s" x="600" y="398">superuser or service user</text>
+        <text class="s" x="34" y="418">· ListTablets, Checksum (when fine-grained control is on)</text><text class="s" x="600" y="418">superuser only</text>
+        <text class="s" x="20" y="484">Because the master refuses superusers for heartbeats, an operator account cannot masquerade as a tablet server and obtain a certificate.</text><text class="s" x="20" y="502">With the default user ACL of *, any identity that can authenticate has user-level access to every table: coarse ACLs say who may use Kudu, not what they may use it for.</text>
+      </svg>
+      </div>
+      <figcaption>The role split protects the internals: an application account cannot call the Raft or tablet-copy services, however it authenticates, because those methods accept only the service user and superusers.</figcaption>
+    </figure>
+  </section>
+
+  <section id="ranger">
+    <h2>Fine-grained permission: Ranger and authorization tokens</h2>
+    <div class="prose">
+      <p>For per-table and per-column rules, Kudu (1.12 and later) uses Apache Ranger. The pattern is the same as for identity: ask the central service rarely, and carry the answer in a signed, short-lived token that every tablet server can check on its own.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 520" role="img" aria-label="The master asks Ranger through a Java subprocess, builds an authorization token listing the user's privileges on a table, the client attaches it to every write and scan, and the tablet server checks the token's privileges against the operation.">
+        <defs><marker id="i4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-client" x="20" y="30" width="200" height="90" rx="6"/><text class="t" x="34" y="56">Client</text><text class="s" x="34" y="76">opens a table; keeps the</text><text class="s" x="34" y="92">authorization token</text>
+        <rect class="b-master" x="330" y="30" width="250" height="90" rx="6"/><text class="t" x="344" y="56">Master</text><text class="s" x="344" y="76">DDL and metadata checks go</text><text class="s" x="344" y="92">to Ranger; builds the token</text><text class="s" x="344" y="108">for the table</text>
+        <rect class="b-disk" x="690" y="30" width="270" height="90" rx="6"/><text class="t" x="704" y="56">Ranger (via a Java subprocess)</text><text class="s" x="704" y="76">kudu-subprocess.jar hosts the Ranger</text><text class="s" x="704" y="92">client; policies cached, polled every 30 s</text>
+        <rect class="b-ts" x="330" y="190" width="250" height="90" rx="6"/><text class="t" x="344" y="216">Tablet server</text><text class="s" x="344" y="236">--tserver_enforce_access_control</text><text class="s" x="344" y="252">verifies the token, compares its</text><text class="s" x="344" y="268">privileges with the operation</text>
+        <path class="ln" marker-end="url(#i4)" d="M220 62 H 328"/><text class="s h" x="232" y="54">① open table</text>
+        <path class="ln" marker-end="url(#i4)" d="M580 62 H 688"/><text class="s h" x="596" y="56">② ask Ranger</text>
+        <path class="ln-d" marker-end="url(#i4)" d="M688 96 H 582"/>
+        <path class="ln-d" marker-end="url(#i4)" d="M328 100 C 280 130, 250 130, 222 108"/><text class="s h" x="240" y="146">③ token</text>
+        <path class="ln" marker-end="url(#i4)" d="M120 120 C 120 190, 240 230, 328 232"/><text class="s h" x="150" y="226">④ every Write and Scan carries it</text>
+
+        <rect class="b-master" x="20" y="310" width="440" height="190" rx="6"/><text class="t" x="34" y="334">What the token holds (AuthzTokenPB)</text><text class="m" x="34" y="358">username</text><text class="m" x="34" y="378">table_id</text><text class="m" x="34" y="398">scan, insert, update, delete</text><text class="s" x="34" y="420">and per-column scan privileges</text><text class="s" x="34" y="448">Signed by the master, valid 5 minutes,</text><text class="s" x="34" y="464">and tied to one table id, so it cannot be</text><text class="s" x="34" y="480">reused on another table.</text>
+        <rect class="b-ts" x="480" y="310" width="480" height="190" rx="6"/><text class="t" x="494" y="334">What the tablet server requires</text>
+        <text class="m" x="494" y="358">Write: insert, update or delete privilege</text><text class="s" x="494" y="374">(an upsert needs both insert and update)</text>
+        <text class="m" x="494" y="398">Scan: SELECT on the table, or on each</text><text class="s" x="494" y="414">projected column and each predicate column</text>
+        <text class="m" x="494" y="438">Ordered scan: also the key columns</text>
+        <text class="s" x="494" y="466">A predicate counts as reading the column:</text><text class="s" x="494" y="482">a user cannot probe a hidden column by filtering on it.</text>
+      </svg>
+      </div>
+      <figcaption>Master-side rules (for example <code>CREATE</code> on the database to create a table, <code>DROP</code> on the table to delete it) are in the policy tables of <code>docs/security.adoc</code>. A special <code>--trusted_user_acl</code> exempts users from Ranger checks, intended for engines like Impala that enforce their own policy.</figcaption>
+    </figure>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Ranger term</th><th>Meaning in Kudu</th></tr></thead>
+        <tbody>
+          <tr><td>Database</td><td>Not a Kudu concept; the prefix of a table name, <code>db.table</code></td></tr>
+          <tr><td>Table, column</td><td>One Kudu table, one column of it</td></tr>
+          <tr><td>Actions</td><td>ALTER, CREATE, DELETE, DROP, INSERT, UPDATE, SELECT, plus ALL and METADATA</td></tr>
+          <tr><td><code>{OWNER}</code> policies</td><td>Apply only when the user owns the table, so one policy covers every owner</td></tr>
+          <tr><td>Delegate admin</td><td>Required to change privileges or table ownership; not implied by ALL</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Two limits to remember. Ranger rules are <strong>not</strong> enforced on the web UI, which can show data in places such as logs, scans and metrics, so limit or redact the UI. And since a tablet server relies on tokens issued by the master, the token lifetime (5 minutes) is also roughly the longest delay before a removed privilege stops working on a table a client already has open.</p>
+  </section>
+
+  <section id="rest">
+    <h2>Encryption at rest</h2>
+    <div class="prose">
+      <p>With <code>--encrypt_data_at_rest</code>, every file Kudu writes (WAL segments, data blocks, metadata) is encrypted with AES in counter mode, using 128, 192 or 256-bit keys. Keys form a chain, so that the disk never holds a key that opens its own data.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 360" role="img" aria-label="Key hierarchy: the cluster key stays in the key management service; each server has a server key stored encrypted under the cluster key; each file has its own file key stored encrypted under the server key; the file's data is encrypted with the file key.">
+        <defs><marker id="i5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-disk" x="20" y="30" width="250" height="100" rx="6"/><text class="t" x="34" y="56">Cluster key</text><text class="s" x="34" y="76">held by the KMS (Ranger KMS or</text><text class="s" x="34" y="92">Hadoop KMS), never on a Kudu disk</text><text class="s" x="34" y="112">name: --encryption_cluster_key_name</text>
+        <rect class="b-client" x="360" y="30" width="250" height="100" rx="6"/><text class="t" x="374" y="56">Server key</text><text class="s" x="374" y="76">one per server; stored in the</text><text class="s" x="374" y="92">server's instance file, encrypted</text><text class="s" x="374" y="112">by the cluster key</text>
+        <rect class="b-ts" x="700" y="30" width="260" height="100" rx="6"/><text class="t" x="714" y="56">File key</text><text class="s" x="714" y="76">one per physical file; kept only</text><text class="s" x="714" y="92">in a form encrypted by the</text><text class="s" x="714" y="112">server key</text>
+        <path class="ln" marker-end="url(#i5)" d="M270 80 H 358"/><text class="s h c" x="314" y="72">wraps</text>
+        <path class="ln" marker-end="url(#i5)" d="M610 80 H 698"/><text class="s h c" x="654" y="72">wraps</text>
+        <rect class="b-ts" x="700" y="170" width="260" height="56" rx="6"/><text class="t" x="714" y="194">File contents</text><text class="s" x="714" y="212">AES-CTR with the file key</text>
+        <path class="ln" marker-end="url(#i5)" d="M830 130 V 168"/>
+
+        <rect class="b-master" x="20" y="170" width="640" height="170" rx="6"/><text class="t" x="34" y="194">What this buys and what it does not</text>
+        <text class="s" x="34" y="216">+ A stolen disk, backup or decommissioned drive reveals nothing without the KMS.</text>
+        <text class="s" x="34" y="236">+ Rotating or revoking the cluster key at the KMS controls every server at once.</text>
+        <text class="s" x="34" y="262" fill="var(--raft)">− The default key provider is not secure: it stores server keys in the clear. Use ranger-kms.</text>
+        <text class="s" x="34" y="282" fill="var(--raft)">− Supported on fresh installations only. Existing directories will not start with it on.</text>
+        <text class="s" x="34" y="302" fill="var(--raft)">− Data in memory, on the wire (use TLS) and in the web UI is outside its scope.</text>
+        <text class="s" x="34" y="322">· CLI tools that read files directly need the same flags and the instance file.</text>
+        <rect class="b-disk" x="700" y="246" width="260" height="94" rx="6"/><text class="t" x="714" y="270">Key lengths</text><text class="s" x="714" y="290">--encryption_key_length: 128 by</text><text class="s" x="714" y="306">default; 192 and 256 supported</text><text class="s" x="714" y="326">(AES-128/192/256-CTR)</text>
+      </svg>
+      </div>
+      <figcaption>Encryption at rest is independent of the other layers: you can have it without Kerberos, or Kerberos without it. The threat model says plainly that an unencrypted data directory is the documented default, so a scanner that reports "data files are not encrypted" is describing a setting, not a bug.</figcaption>
+    </figure>
+  </section>
+
+  <section id="surfaces">
+    <h2>The surfaces people forget</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Surface</th><th>What it exposes</th><th>Default</th><th>What to do</th></tr></thead>
+        <tbody>
+          <tr><td>Web UI (ports 8050, 8051)</td><td>Schema, cluster state, metrics, running RPCs and scans; not row values</td><td>on, plain HTTP, no login</td><td>HTTPS with <code>--webserver_certificate_file</code>; <code>--webserver_require_spnego</code> for Kerberos login; firewall; or <code>--webserver_enabled=false</code> (this also removes <code>/metrics</code>)</td></tr>
+          <tr><td>Logs and error messages</td><td>Could contain row values</td><td>redacted: <code>--redact=all</code></td><td>keep it; <code>--redact=log</code> shows data in the UI but not the logs</td></tr>
+          <tr><td>Loopback RPC</td><td>Same-host client to server traffic</td><td>not encrypted, by design, so Spark and Impala tasks on a replica's host skip TLS cost</td><td><code>--rpc_encrypt_loopback_connections</code> if same-host traffic must be encrypted too</td></tr>
+          <tr><td>Master REST API</td><td>Table DDL over HTTP</td><td>off (<code>--enable_rest_api</code>)</td><td>if on, it passes through the same authentication and authorization as RPC, so front it like the UI</td></tr>
+          <tr><td>Credentials on disk</td><td>Keytabs, TLS private keys, flag files</td><td>Kudu refuses world-readable keytabs and keys</td><td>file permissions; do not run daemons as root; <code>--allow_world_readable_credentials</code> is unsafe</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="check">
+    <h2>A checklist for a secure cluster</h2>
+    <ol class="steps">
+      <li><strong>Authentication.</strong> Give each server a Kerberos keytab (<code>--keytab_file</code>), then set <code>--rpc_authentication=required</code> on masters and tablet servers. Test a client with no ticket: it should be refused.</li>
+      <li><strong>Encryption in transit.</strong> Set <code>--rpc_encryption=required</code>. Decide about <code>--rpc_encrypt_loopback_connections</code> and the TLS protocol and cipher flags to match policy.</li>
+      <li><strong>Coarse ACLs.</strong> Replace <code>--user_acl=*</code> with the service accounts and users that need the cluster, and set <code>--superuser_acl</code> to the operators. If an engine such as Impala is your only client, list its service user and let it enforce row and column rules.</li>
+      <li><strong>Fine-grained policy (if you need per-table or per-column rules).</strong> Configure the Ranger client files, set the master's <code>--ranger_config_path</code>, <code>--ranger_java_path</code>, <code>--ranger_jar_path</code> and <code>--trusted_user_acl</code>, and set <code>--tserver_enforce_access_control=true</code> on every tablet server. Rename any tables whose names Ranger cannot handle (leading or trailing dot, names that differ only in case).</li>
+      <li><strong>Data at rest.</strong> On new clusters, <code>--encrypt_data_at_rest=true</code> with <code>--encryption_key_provider=ranger-kms</code>, <code>--ranger_kms_url</code> and an existing cluster key.</li>
+      <li><strong>Web UI and logs.</strong> Serve it over HTTPS, require SPNEGO or restrict the ports, and keep <code>--redact=all</code>.</li>
+      <li><strong>Network boundary.</strong> Even with everything above, keep master and tablet-server ports off the public internet. Leave <code>--trusted_subnets</code> alone unless you have a reason.</li>
+    </ol>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Flag</th><th>Default</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td><code>--rpc_authentication</code></td><td>optional</td><td>disabled, optional or required</td></tr>
+          <tr><td><code>--rpc_encryption</code></td><td>optional</td><td>disabled, optional or required</td></tr>
+          <tr><td><code>--trusted_subnets</code></td><td>private ranges and local subnets</td><td>where unauthenticated or unencrypted clients may connect from</td></tr>
+          <tr><td><code>--user_acl</code> / <code>--superuser_acl</code></td><td><code>*</code> / the daemon's user</td><td>who may use or administer the cluster</td></tr>
+          <tr><td><code>--authn_token_validity_seconds</code></td><td>604800 (7 days)</td><td>authentication token lifetime</td></tr>
+          <tr><td><code>--authz_token_validity_seconds</code></td><td>300 (5 minutes)</td><td>authorization token lifetime</td></tr>
+          <tr><td><code>--tsk_rotation_seconds</code></td><td>86400 (1 day)</td><td>how often a new token signing key is made</td></tr>
+          <tr><td><code>--tserver_enforce_access_control</code></td><td>false</td><td>check authorization tokens on tablet servers</td></tr>
+          <tr><td><code>--encrypt_data_at_rest</code></td><td>false</td><td>AES-CTR for all files; needs a KMS</td></tr>
+          <tr><td><code>--redact</code></td><td>all</td><td>what is hidden in logs and the web UI</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p><strong>Where to read more:</strong> <code>docs/security.adoc</code> for the operator how-to, <code>THREAT_MODEL.md</code> and <code>SECURITY.md</code> for what the project does and does not promise (and how to report a vulnerability, privately, to <code>security@apache.org</code>), and in the source <code>rpc/server_negotiation.cc</code>, <code>security/token_signer.cc</code>, <code>master/master_service.cc</code>, <code>server/server_base.cc</code> (<code>Authorize</code>), <code>master/ranger_authz_provider.cc</code> and <code>tserver/tablet_service.cc</code> (token checks). One known limit from the docs: Kudu does not accept externally issued certificates for its internal connections.</p>
+    </div>
+  </section>
+</main>
