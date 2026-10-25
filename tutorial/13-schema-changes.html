@@ -1,0 +1,325 @@
+<title>Kudu Schema Changes Tutorial</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column; wide figures scroll inside their own frame on phones.
+   Palette is keyed to the roles in the system: client (ochre), master (indigo), tablet server (teal), Raft/WAL (rust), disk (slate). */
+:root {
+  --bg: #f4f7f8; --surf: #ffffff; --fg: #14212b; --muted: #55646e; --line: #d0d9df; --line2: #8fa0ab;
+  --client: #a9680f; --client-t: #fbeed6;
+  --master: #4a4db8; --master-t: #e6e7fa;
+  --ts: #0d7566; --ts-t: #d9f1ed;
+  --raft: #bb4a22; --raft-t: #fae3d9;
+  --disk: #52646f; --disk-t: #e6ecef;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+    --client: #e3ad50; --client-t: #3a2f17;
+    --master: #a1a3f5; --master-t: #25284d;
+    --ts: #4fc9b4; --ts-t: #11322d;
+    --raft: #f2905f; --raft-t: #3d2218;
+    --disk: #a3b4bf; --disk-t: #22323c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+  --client: #e3ad50; --client-t: #3a2f17;
+  --master: #a1a3f5; --master-t: #25284d;
+  --ts: #4fc9b4; --ts-t: #11322d;
+  --raft: #f2905f; --raft-t: #3d2218;
+  --disk: #a3b4bf; --disk-t: #22323c;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.65 var(--body);
+  padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.prose { max-width: 68ch; display: flex; flex-direction: column; gap: 12px; }
+p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.1rem; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+code { font: 500 .88em var(--mono); background: var(--disk-t); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--master); }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { background: var(--surf); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { font-size: .92rem; color: var(--muted); max-width: 78ch; }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.role { background: var(--surf); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role h3 { color: var(--c); }
+.role p, .role li { font-size: .95rem; }
+.role ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; max-width: 76ch; }
+.note { border-left: 3px solid var(--raft); padding: 4px 0 4px 14px; color: var(--muted); max-width: 68ch; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font: 500 13px var(--mono); text-decoration: none; color: var(--fg); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+/* SVG vocabulary */
+svg text { font-family: var(--body); fill: var(--fg); font-size: 13px; }
+svg .t { font-weight: 600; }
+svg .s { font-size: 11.5px; fill: var(--muted); }
+svg .m { font-family: var(--mono); font-size: 11.5px; }
+svg .h { paint-order: stroke; stroke: var(--surf); stroke-width: 5px; stroke-linejoin: round; }
+svg .c { text-anchor: middle; }
+svg .e { text-anchor: end; }
+svg .box { fill: var(--surf); stroke: var(--line2); stroke-width: 1.4; }
+svg .grp { fill: none; stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .b-client { fill: var(--client-t); stroke: var(--client); stroke-width: 1.5; }
+svg .b-master { fill: var(--master-t); stroke: var(--master); stroke-width: 1.5; }
+svg .b-ts { fill: var(--ts-t); stroke: var(--ts); stroke-width: 1.5; }
+svg .b-raft { fill: var(--raft-t); stroke: var(--raft); stroke-width: 1.5; }
+svg .b-disk { fill: var(--disk-t); stroke: var(--disk); stroke-width: 1.5; }
+svg .solid-ts { fill: var(--ts); stroke: var(--ts); }
+svg .solid-ts + text, svg text.on { fill: var(--surf); }
+svg .ln { fill: none; stroke: currentColor; stroke-width: 1.5; }
+svg .ln-r { fill: none; stroke: var(--raft); stroke-width: 1.6; stroke-dasharray: 6 4; }
+svg .ln-d { fill: none; stroke: var(--line2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+svg .life { stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 3 5; }
+</style>
+<main>
+  <header class="prose">
+    <span class="eyebrow">Learning Kudu · Part 13</span>
+    <h1>Schema changes and alter table</h1>
+    <p class="lede">A Kudu table can change while it is being read and written: columns come and go, and range partitions are added and dropped. The master records the new schema first, then pushes it to every tablet through Raft, while old data on disk keeps its old shape and is reconciled when it is read. This part follows one <code>ALTER TABLE</code> end to end and explains the ideas that make it safe: column IDs, schema versions, and read-time projection.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#what">What can change</a><a href="#ids">Column IDs</a><a href="#flow">The alter flow</a><a href="#done">When is it done?</a><a href="#tablet">On a tablet</a><a href="#read">Reading old data</a><a href="#ranges">Range partitions</a><a href="#clients">Clients and writes</a><a href="#src">Source map</a>
+    </nav>
+  </header>
+
+  <section id="what">
+    <h2>What can be altered, and what cannot</h2>
+    <div class="prose">
+      <p>An alter request carries a list of <strong>steps</strong>, applied in order and committed together as one transactional change to the table. The master's step types are <code>ADD_COLUMN</code>, <code>DROP_COLUMN</code>, <code>RENAME_COLUMN</code>, <code>ALTER_COLUMN</code>, <code>ADD_RANGE_PARTITION</code> and <code>DROP_RANGE_PARTITION</code>. The same request can also rename the table, change its owner or comment, and set some table properties (extra configs, disk-size and row-count limits, replication factor).</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 330" role="img" aria-label="Three columns: allowed column changes, allowed table and partition changes, and changes that are not allowed.">
+        <rect class="b-ts" x="20" y="14" width="300" height="300" rx="8"/><text class="t" x="38" y="42">Columns (non-key)</text>
+        <g class="s"><text x="38" y="72">• add a column</text><text x="38" y="90">  nullable, or NOT NULL with a default</text><text x="38" y="116">• drop a column</text><text x="38" y="142">• rename a column (key columns too)</text><text x="38" y="168">• alter: default, remove default,</text><text x="38" y="184">  encoding, compression, block size,</text><text x="38" y="200">  comment, immutable flag</text></g>
+        <text class="s" x="38" y="236">Each ADD needs a default for NOT NULL</text><text class="s" x="38" y="252">columns so that old rows have a value.</text><text class="s" x="38" y="278">Limit: 300 columns per table by default</text><text class="m" x="38" y="296">--max_num_columns</text>
+        <rect class="b-master" x="340" y="14" width="300" height="300" rx="8"/><text class="t" x="358" y="42">Table and partitions</text>
+        <g class="s"><text x="358" y="72">• rename the table</text><text x="358" y="98">• change owner, comment</text><text x="358" y="124">• change extra configs, limits,</text><text x="358" y="140">  number of replicas</text><text x="358" y="166">• add range partitions</text><text x="358" y="192">• drop range partitions</text><text x="358" y="208">  (deletes those tablets and their data)</text></g>
+        <text class="s" x="358" y="246">Any number of range add/drop steps can</text><text class="s" x="358" y="262">be combined in one alter; new ranges</text><text class="s" x="358" y="278">may not overlap existing ones.</text>
+        <rect class="b-raft" x="660" y="14" width="300" height="300" rx="8"/><text class="t" x="678" y="42">Not supported</text>
+        <g class="s"><text x="678" y="72">• change a primary key (add, drop, retype)</text><text x="678" y="98">• change a column's type</text><text x="678" y="124">• change hash partitioning or its bucket</text><text x="678" y="140">  count of existing ranges</text><text x="678" y="166">• split or merge partitions</text><text x="678" y="192">• drop a key column</text></g>
+        <text class="s" x="678" y="236">Workaround: create a new table with the</text><text class="s" x="678" y="252">schema you want and copy the data (for</text><text class="s" x="678" y="268">example with Spark or Impala).</text>
+      </svg>
+      </div>
+      <figcaption>From <code>docs/schema_design.adoc</code> (Schema Alterations and Known Limitations) and the step handling in <code>CatalogManager::ProcessAlterTableSteps</code>. The master rejects an <code>ADD_COLUMN</code> of a NOT NULL column without a default and a <code>DROP_COLUMN</code> of a key column.</figcaption>
+    </figure>
+  </section>
+
+  <section id="ids">
+    <h2>Column IDs: names are not identity</h2>
+    <div class="prose">
+      <p>Clients refer to columns by <em>name</em>. Inside the server every column also has a numeric <strong>column ID</strong> that is never reused. The table metadata keeps a counter (<code>next_column_id</code>) that only grows. IDs are internal; a client may not set one (an <code>ADD_COLUMN</code> that includes an ID is rejected).</p>
+      <p>Why do this? Because a name can be reused for different data. The design doc's example drops <code>col_b</code> and adds a new <code>col_b</code>. Old rows must show the new column's default, <em>not</em> the old values that still sit in old files.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 300" role="img" aria-label="A table with columns col_a id 0 and col_b id 1; after drop and re-add of col_b, the new col_b has id 2, and the old data for id 1 is ignored.">
+        <defs><marker id="s1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="t" x="20" y="26">Step 1: CREATE TABLE x (col_a, col_b); INSERT (1, 1)</text>
+        <rect class="b-ts" x="40" y="40" width="150" height="40" rx="4"/><text class="t c" x="115" y="58">col_a</text><text class="s c" x="115" y="74">id 0</text>
+        <rect class="b-ts" x="190" y="40" width="150" height="40" rx="4"/><text class="t c" x="265" y="58">col_b</text><text class="s c" x="265" y="74">id 1</text>
+        <rect class="b-disk" x="40" y="84" width="150" height="30" rx="4"/><text class="m c" x="115" y="104">1</text>
+        <rect class="b-disk" x="190" y="84" width="150" height="30" rx="4"/><text class="m c" x="265" y="104">1</text>
+        <text class="s" x="380" y="60">The row is written to a rowset whose</text><text class="s" x="380" y="76">schema is (id 0, id 1).</text>
+
+        <text class="t" x="20" y="150">Step 2: ALTER TABLE x DROP COLUMN col_b; ADD COLUMN col_b DEFAULT 999</text>
+        <rect class="b-ts" x="40" y="164" width="150" height="40" rx="4"/><text class="t c" x="115" y="182">col_a</text><text class="s c" x="115" y="198">id 0</text>
+        <rect class="b-master" x="190" y="164" width="150" height="40" rx="4"/><text class="t c" x="265" y="182">col_b (new)</text><text class="s c" x="265" y="198">id 2, default 999</text>
+        <rect class="b-disk" x="40" y="208" width="150" height="30" rx="4"/><text class="m c" x="115" y="228">1</text>
+        <rect class="b-master" x="190" y="208" width="150" height="30" rx="4"/><text class="m c" x="265" y="228">999</text>
+        <rect class="grp" x="420" y="164" width="200" height="74" rx="4"/><text class="s c" x="520" y="186">old file still holds id 1 = 1</text><text class="s c" x="520" y="204">id 1 is not in the current schema,</text><text class="s c" x="520" y="220">so it is never shown again</text>
+        <path class="ln-d" marker-end="url(#s1)" d="M418 200 H 344"/>
+        <text class="s" x="40" y="272">The final schema looks the same as the first (same names), but the data is different.</text>
+        <text class="s" x="40" y="290">A client's query "select col_b" keeps working with no refresh, because it names the column.</text>
+      </svg>
+      </div>
+      <figcaption>The same ID rule is what lets <code>RENAME COLUMN</code> be cheap: the ID stays, only the name in the schema changes, so no data is touched. The backup tool (part 12) uses column IDs to detect that a column was dropped or renamed between two backups.</figcaption>
+    </figure>
+  </section>
+
+  <section id="flow">
+    <h2>The alter flow, step by step</h2>
+    <div class="prose">
+      <p>The master is the source of truth for the schema, so it persists the change <em>before</em> any tablet knows about it. Tablets then catch up one by one. The table state is <code>ALTERING</code> until all of them have.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 600" role="img" aria-label="Sequence diagram of an alter table: client, master, tablet leader, and tablet replicas.">
+        <defs><marker id="s2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-client" x="30" y="14" width="130" height="40" rx="6"/><text class="t c" x="95" y="39">Client</text>
+        <rect class="b-master" x="250" y="14" width="200" height="40" rx="6"/><text class="t c" x="350" y="39">Master (leader)</text>
+        <rect class="b-ts" x="560" y="14" width="170" height="40" rx="6"/><text class="t c" x="645" y="39">Tablet leader</text>
+        <rect class="b-raft" x="800" y="14" width="150" height="40" rx="6"/><text class="t c" x="875" y="39">Tablet followers</text>
+        <path class="life" d="M95 54 V 590"/><path class="life" d="M350 54 V 590"/><path class="life" d="M645 54 V 590"/><path class="life" d="M875 54 V 590"/>
+
+        <path class="ln" marker-end="url(#s2)" d="M95 82 H 348"/><text class="s h" x="110" y="76">① AlterTable(steps)</text>
+        <rect class="b-master" x="190" y="92" width="320" height="104" rx="4"/>
+        <text class="s c" x="350" y="112">② validate steps and authorization</text>
+        <text class="s c" x="350" y="130">build the new schema, version = old + 1</text>
+        <text class="s c" x="350" y="148">keep the old one as fully_applied_schema</text>
+        <text class="s c" x="350" y="166">state → ALTERING, write sys.catalog (Raft)</text>
+        <text class="s c" x="350" y="184">tell the Hive Metastore (best effort)</text>
+        <path class="ln-d" marker-end="url(#s2)" d="M348 214 H 97"/><text class="s h" x="110" y="208">AlterTableResponse (new version)</text>
+        <path class="ln-r" marker-end="url(#s2)" d="M350 244 H 643"/><text class="s h" x="370" y="238">③ AlterSchema RPC (one per tablet)</text>
+        <rect class="b-ts" x="560" y="254" width="320" height="54" rx="4"/><text class="s c" x="720" y="274">④ AlterSchemaOp replicated by Raft:</text><text class="s c" x="720" y="292">leader and followers apply the same op</text>
+        <path class="ln-r" marker-end="url(#s2)" d="M645 322 H 873"/><text class="s h" x="700" y="316">replicate</text>
+        <rect class="b-ts" x="560" y="336" width="320" height="38" rx="4"/><text class="s c" x="720" y="352">⑤ exclusive schema lock, new schema,</text><text class="s c" x="720" y="368">flush the MemRowSet, persist metadata</text>
+        <path class="ln-d" marker-end="url(#s2)" d="M645 398 H 352"/><text class="s h" x="390" y="392">⑥ heartbeat: tablet schema version</text>
+        <rect class="b-master" x="200" y="410" width="300" height="52" rx="4"/><text class="s c" x="350" y="430">⑦ all tablets ≥ version?</text><text class="s c" x="350" y="448">state → RUNNING, drop fully_applied_schema</text>
+        <path class="ln" marker-end="url(#s2)" d="M95 500 H 348"/><text class="s h" x="110" y="494">⑧ IsAlterTableDone (polled)</text>
+        <path class="ln-d" marker-end="url(#s2)" d="M348 524 H 97"/><text class="s h" x="150" y="518">done = false … false … true</text>
+        <text class="s" x="40" y="566">With wait(false) the client skips step ⑧. A tablet that missed the RPC is fixed when it next reports an old version.</text>
+      </svg>
+      </div>
+      <figcaption>The sys.catalog write (②) is the commit point: after it, the change is durable even if the master fails over, and the new master keeps sending AlterSchema to tablets. The code comment in <code>CatalogManager::AlterTableHelper</code> numbers these stages. Table renames when the Hive Metastore integration is on are first done in the HMS and then applied to Kudu, to avoid races.</figcaption>
+    </figure>
+    <div class="note">The default for the client is to wait: <code>KuduTableAlterer::wait(true)</code>. <code>Alter()</code> then keeps asking <code>IsAlterTableDone</code> until the master says it is done or the timeout expires. A timeout does not cancel the alteration; it only stops the client from waiting.</div>
+  </section>
+
+  <section id="done">
+    <h2>When is the alter "done"?</h2>
+    <div class="prose">
+      <p>The master tracks the schema version each tablet last reported (heartbeats carry it), in a small histogram per table. An alter is in progress while the <em>lowest</em> reported version is below the table's current version, or while some tablet has not reported at all. While it is in progress the master keeps both schemas: the current one and the <code>fully_applied_schema</code>, the last schema that every tablet is known to have. Metadata requests during that time return the fully applied schema, so a client does not start using a column that some tablets do not have yet.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 240" role="img" aria-label="Five tablets with reported schema versions 7, 7, 6, 7 and not yet reported; the table's current version is 7 and the alter is in progress.">
+        <text class="t" x="20" y="26">Table version = 7. Reported by each tablet:</text>
+        <g>
+          <rect class="b-ts" x="40" y="46" width="150" height="56" rx="5"/><text class="t c" x="115" y="70">tablet 1</text><text class="s c" x="115" y="90">version 7</text>
+          <rect class="b-ts" x="210" y="46" width="150" height="56" rx="5"/><text class="t c" x="285" y="70">tablet 2</text><text class="s c" x="285" y="90">version 7</text>
+          <rect class="b-raft" x="380" y="46" width="150" height="56" rx="5"/><text class="t c" x="455" y="70">tablet 3</text><text class="s c" x="455" y="90">version 6 (lagging)</text>
+          <rect class="b-ts" x="550" y="46" width="150" height="56" rx="5"/><text class="t c" x="625" y="70">tablet 4</text><text class="s c" x="625" y="90">version 7</text>
+          <rect class="grp" x="720" y="46" width="150" height="56" rx="5"/><text class="t c" x="795" y="70">tablet 5</text><text class="s c" x="795" y="90">not yet reported</text>
+        </g>
+        <text class="s" x="40" y="134">Lowest value is "not yet reported" (-1), then 6: both are below 7, so the alter is still in progress.</text>
+        <text class="s" x="40" y="156">When tablet 3 reports 7 and tablet 5 reports 7 (or more), IsAlterInProgress turns false; the master then</text>
+        <text class="s" x="40" y="174">changes the table to RUNNING and clears the old schema.</text>
+        <text class="s" x="40" y="204">If a tablet reports a version higher than the table's, the master logs an error ("corruption"): that should never happen.</text>
+      </svg>
+      </div>
+      <figcaption>Implemented in <code>TableInfo::IsAlterInProgress</code> and <code>HandleTabletSchemaVersionReport</code>. The tablet server also puts a tablet that just applied an alter into the next heartbeat right away, to unblock waiting clients quickly.</figcaption>
+    </figure>
+  </section>
+
+  <section id="tablet">
+    <h2>What a tablet does</h2>
+    <div class="prose">
+      <p>The tablet server's <code>AlterSchema</code> handler is careful to be repeatable, because the master may send it several times (after a failover, or when a lagging replica reports an old version):</p>
+    </div>
+    <ul class="steps">
+      <li>If the tablet already has exactly the requested version, it just replies "done". It also checks the schema is the same one the request names, and answers with an error code if not (<code>MISMATCHED_SCHEMA</code>).</li>
+      <li>If the tablet has a <em>newer</em> version than the request, it rejects the request (<code>TABLET_HAS_A_NEWER_SCHEMA</code>) and the master's retry stops mattering.</li>
+      <li>Otherwise it submits an <code>AlterSchemaOp</code> through consensus, like a write (part 5), so every replica changes at the same point in the log.</li>
+      <li>On apply, the op takes the tablet's <strong>schema lock in exclusive mode</strong>. Write ops hold it in shared mode for their whole life, so the alter waits for in-flight writes and briefly blocks new ones. It also blocks concurrent flushes, because a MemRowSet's schema cannot be changed in place.</li>
+      <li>It installs the new schema and version in the tablet metadata (and the table name or extra config if those changed) and then <strong>flushes</strong> the MemRowSet so no in-memory data has the old shape. The op's commit message is logged, and only then is the lock released, as a workaround noted in the code (KUDU-915).</li>
+    </ul>
+    <div class="note">Tablet bootstrap (part 6) rewinds the schema to what was in effect when each logged op was written, so replaying the WAL after a restart still decodes old writes correctly.</div>
+  </section>
+
+  <section id="read">
+    <h2>Reading data written under older schemas</h2>
+    <div class="prose">
+      <p>An alter does not rewrite files. A tablet can therefore hold rowsets written under several schemas at once. When a scan runs, the tablet picks a read schema from its current metadata and each rowset <strong>projects</strong> its data onto it.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 330" role="img" aria-label="Three rowsets with different schemas projected onto the current schema; added columns are filled from the read default or NULL; dropped columns are ignored; compaction writes the new schema.">
+        <defs><marker id="s3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="t" x="20" y="24">Rowsets as written</text><text class="t" x="560" y="24">What a scan sees (current schema: a, c)</text>
+        <rect class="b-disk" x="20" y="40" width="440" height="52" rx="5"/><text class="t" x="34" y="62">DiskRowSet 1</text><text class="m" x="34" y="80">schema (a, b)</text>
+        <rect class="b-disk" x="20" y="108" width="440" height="52" rx="5"/><text class="t" x="34" y="130">DiskRowSet 2</text><text class="m" x="34" y="148">schema (a, b, c)</text>
+        <rect class="b-disk" x="20" y="176" width="440" height="52" rx="5"/><text class="t" x="34" y="198">DiskRowSet 3 (after dropping b)</text><text class="m" x="34" y="216">schema (a, c)</text>
+        <rect class="b-ts" x="560" y="40" width="390" height="52" rx="5"/><text class="m" x="574" y="62">a  from file</text><text class="m" x="574" y="80">c  from the read default, or NULL</text>
+        <rect class="b-ts" x="560" y="108" width="390" height="52" rx="5"/><text class="m" x="574" y="130">a, c  from file</text><text class="m" x="574" y="148">b  not in the read schema: skipped</text>
+        <rect class="b-ts" x="560" y="176" width="390" height="52" rx="5"/><text class="m" x="574" y="198">a, c  from file</text>
+        <path class="ln" marker-end="url(#s3)" d="M460 66 H 556"/><path class="ln" marker-end="url(#s3)" d="M460 134 H 556"/><path class="ln" marker-end="url(#s3)" d="M460 202 H 556"/>
+        <rect class="grp" x="20" y="248" width="930" height="68" rx="6"/>
+        <text class="s" x="36" y="270">Delta files: an update to a column that was later removed is ignored; an update to an added column applies on top of the materialized default.</text>
+        <text class="s" x="36" y="290">Compaction: input files with different schemas are merged into one written with the latest schema. For data files the added column's read default</text>
+        <text class="s" x="36" y="306">is written as real data. Delta files must be projected too, because a serialized change list carries no schema.</text>
+      </svg>
+      </div>
+      <figcaption>For each column in the read schema that an old rowset lacks, Kudu uses the column's <strong>read default</strong> if it has one, and otherwise the column must be nullable and is filled with NULLs. This is why a NOT NULL column needs a default at ADD time. Type changes are not handled (the design doc lists type adapters as future work), which is why the column type cannot be altered.</figcaption>
+    </figure>
+  </section>
+
+  <section id="ranges">
+    <h2>Range partitions in an alter</h2>
+    <div class="prose">
+      <p>Adding or dropping a range is part of the same request, and the master works out the tablets involved while processing the steps. For an added range it creates the new tablet metadata (one tablet per hash bucket for that range) and the tablets get created through the normal path from part 3. For a dropped range it marks those tablets deleted and sends delete requests after the sys.catalog write commits. The table's cached locations are invalidated so clients re-fetch them.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 190" role="img" aria-label="A time-ordered range partitioned table where a new month range is added at the right and the oldest range is dropped at the left in one alter.">
+        <defs><marker id="s4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="grp" x="40" y="40" width="170" height="60" rx="5"/><text class="s c" x="125" y="64">Jan  (dropped)</text><text class="s c" x="125" y="82">tablets and data deleted</text>
+        <rect class="b-ts" x="230" y="40" width="170" height="60" rx="5"/><text class="t c" x="315" y="68">Feb</text>
+        <rect class="b-ts" x="420" y="40" width="170" height="60" rx="5"/><text class="t c" x="505" y="68">Mar</text>
+        <rect class="b-ts" x="610" y="40" width="170" height="60" rx="5"/><text class="t c" x="695" y="68">Apr</text>
+        <rect class="b-master" x="800" y="40" width="150" height="60" rx="5" style="stroke-dasharray:5 3"/><text class="t c" x="875" y="64">May (added)</text><text class="s c" x="875" y="82">new tablets created</text>
+        <path class="ln" d="M40 126 H 940" marker-end="url(#s4)"/><text class="s" x="40" y="150">key range (for example event time)</text>
+        <text class="s" x="40" y="172">One AlterTable request: DROP RANGE [Jan, Feb) and ADD RANGE [May, Jun). Writes for Jan after the drop fail.</text>
+      </svg>
+      </div>
+      <figcaption>The rolling-window pattern for time series, from the schema design guide. A dropped range deletes its data for good (<code>--tablet_history_max_age_sec</code> does not apply, since the tablets are removed), so only drop ranges you have backed up or no longer need. Hash schemas of existing ranges cannot change; a new range may have its own custom hash schema when <code>--enable_per_range_hash_schemas</code> (true) allows it.</figcaption>
+    </figure>
+  </section>
+
+  <section id="clients">
+    <h2>What clients and writes see during an alter</h2>
+    <div class="prose">
+      <p>Clients identify columns by name, type and nullability, never by ID. A write or scan names the columns it wants, and the server maps names to current IDs. A name that no longer exists is an error; a type or nullability mismatch is also an error. A client that opened its table handle before the alter keeps working as long as the columns it uses still exist, and a long-lived handle sees the new schema after it refreshes the table (open the table again).</p>
+      <p>In the Java and C++ clients the alterer is a builder: <code>NewTableAlterer(name)</code>, then <code>AddColumn(...)</code> / <code>DropColumn</code> / <code>AlterColumn</code> with a <code>KuduColumnSpec</code> (default, encoding, compression, block size, comment, rename, nullable, immutable), <code>RenameTo</code>, <code>AddRangePartition</code> / <code>DropRangePartition</code>, <code>SetOwner</code>, <code>SetComment</code>, <code>timeout</code> and <code>wait</code>, and finally <code>Alter()</code>. SQL engines map their <code>ALTER TABLE</code> statements onto the same calls.</p>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Setting</th><th>Default</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><code>--max_num_columns</code> (master)</td><td>300</td><td>maximum columns in a table, checked on create and alter</td></tr>
+          <tr><td><code>--max_table_comment_length</code>, <code>--max_column_comment_length</code> (master)</td><td>256 each</td><td>length limits for comments</td></tr>
+          <tr><td><code>--catalog_manager_check_ts_count_for_alter_table</code> (master)</td><td>true</td><td>makes sure enough live tablet servers exist for the replication factor before a table is altered (hidden flag)</td></tr>
+          <tr><td><code>--enable_per_range_hash_schemas</code> (master)</td><td>true</td><td>allow a custom hash schema when adding a range partition</td></tr>
+          <tr><td><code>KuduTableAlterer::wait</code></td><td>true</td><td>wait until <code>IsAlterTableDone</code> says done</td></tr>
+        </tbody>
+      </table>
+    </div>
+    
+  </section>
+
+  <section id="src">
+    <h2>Where to read the code</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>File</th><th>What is in it</th></tr></thead>
+        <tbody>
+          <tr><td><code>docs/design-docs/schema-change.md</code></td><td>column IDs, read-time handling, compaction</td></tr>
+          <tr><td><code>docs/schema_design.adoc</code> (Schema Alterations, limitations)</td><td>the user-facing rules</td></tr>
+          <tr><td><code>master/master.proto</code> (<code>AlterTableRequestPB</code>, <code>IsAlterTableDoneRequestPB</code>)</td><td>the step types and the RPCs</td></tr>
+          <tr><td><code>master/catalog_manager.cc</code> (<code>AlterTableHelper</code>, <code>ProcessAlterTableSteps</code>, <code>IsAlterTableDone</code>, <code>HandleTabletSchemaVersionReport</code>, <code>AsyncAlterTable</code>)</td><td>validation, versioning, ALTERING state, distribution to tablets</td></tr>
+          <tr><td><code>tserver/tablet_service.cc</code> (<code>AlterSchema</code>)</td><td>the tablet-side handler and its idempotence checks</td></tr>
+          <tr><td><code>tablet/ops/alter_schema_op.cc</code>, <code>tablet/tablet.cc</code> (<code>AlterSchema</code>)</td><td>the replicated op, the schema lock, the flush</td></tr>
+          <tr><td><code>client/client.h</code> (<code>KuduTableAlterer</code>), <code>client/schema.h</code> (<code>KuduColumnSpec</code>)</td><td>the client builder API</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
