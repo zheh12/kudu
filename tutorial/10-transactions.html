@@ -1,0 +1,384 @@
+<title>Kudu Transactions Tutorial</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column; wide figures scroll inside their own frame on phones.
+   Palette is keyed to the roles in the system: client (ochre), master (indigo), tablet server (teal), Raft/WAL (rust), disk (slate). */
+:root {
+  --bg: #f4f7f8; --surf: #ffffff; --fg: #14212b; --muted: #55646e; --line: #d0d9df; --line2: #8fa0ab;
+  --client: #a9680f; --client-t: #fbeed6;
+  --master: #4a4db8; --master-t: #e6e7fa;
+  --ts: #0d7566; --ts-t: #d9f1ed;
+  --raft: #bb4a22; --raft-t: #fae3d9;
+  --disk: #52646f; --disk-t: #e6ecef;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+    --client: #e3ad50; --client-t: #3a2f17;
+    --master: #a1a3f5; --master-t: #25284d;
+    --ts: #4fc9b4; --ts-t: #11322d;
+    --raft: #f2905f; --raft-t: #3d2218;
+    --disk: #a3b4bf; --disk-t: #22323c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+  --client: #e3ad50; --client-t: #3a2f17;
+  --master: #a1a3f5; --master-t: #25284d;
+  --ts: #4fc9b4; --ts-t: #11322d;
+  --raft: #f2905f; --raft-t: #3d2218;
+  --disk: #a3b4bf; --disk-t: #22323c;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.65 var(--body);
+  padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.prose { max-width: 68ch; display: flex; flex-direction: column; gap: 12px; }
+p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.1rem; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+code { font: 500 .88em var(--mono); background: var(--disk-t); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--master); }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { background: var(--surf); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { font-size: .92rem; color: var(--muted); max-width: 78ch; }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.role { background: var(--surf); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role h3 { color: var(--c); }
+.role p, .role li { font-size: .95rem; }
+.role ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; max-width: 76ch; }
+.note { border-left: 3px solid var(--raft); padding: 4px 0 4px 14px; color: var(--muted); max-width: 68ch; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font: 500 13px var(--mono); text-decoration: none; color: var(--fg); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+/* SVG vocabulary */
+svg text { font-family: var(--body); fill: var(--fg); font-size: 13px; }
+svg .t { font-weight: 600; }
+svg .s { font-size: 11.5px; fill: var(--muted); }
+svg .m { font-family: var(--mono); font-size: 11.5px; }
+svg .h { paint-order: stroke; stroke: var(--surf); stroke-width: 5px; stroke-linejoin: round; }
+svg .c { text-anchor: middle; }
+svg .e { text-anchor: end; }
+svg .box { fill: var(--surf); stroke: var(--line2); stroke-width: 1.4; }
+svg .grp { fill: none; stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .b-client { fill: var(--client-t); stroke: var(--client); stroke-width: 1.5; }
+svg .b-master { fill: var(--master-t); stroke: var(--master); stroke-width: 1.5; }
+svg .b-ts { fill: var(--ts-t); stroke: var(--ts); stroke-width: 1.5; }
+svg .b-raft { fill: var(--raft-t); stroke: var(--raft); stroke-width: 1.5; }
+svg .b-disk { fill: var(--disk-t); stroke: var(--disk); stroke-width: 1.5; }
+svg .solid-ts { fill: var(--ts); stroke: var(--ts); }
+svg .solid-ts + text, svg text.on { fill: var(--surf); }
+svg .ln { fill: none; stroke: currentColor; stroke-width: 1.5; }
+svg .ln-r { fill: none; stroke: var(--raft); stroke-width: 1.6; stroke-dasharray: 6 4; }
+svg .ln-d { fill: none; stroke: var(--line2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+svg .life { stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 3 5; }
+</style>
+<main>
+  <header class="prose">
+    <span class="eyebrow">Learning Kudu · Part 10</span>
+    <h1>Multi-tablet transactions</h1>
+    <p class="lede">A normal Kudu write is atomic inside one tablet. A <strong>transaction</strong> lets a client insert rows into many tablets and make them all appear at once, or not at all. This part shows who coordinates that, the states every tablet goes through, the commit protocol, and why a reader never sees half a transaction. It is a young feature: read the limits section before relying on it.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#actors">Actors</a><a href="#states">Coordinator states</a><a href="#register">Participants</a><a href="#commit">Commit</a><a href="#visible">Visibility</a><a href="#locks">Locking</a><a href="#alive">Heartbeats</a><a href="#api">Client API</a><a href="#limits">Limits</a><a href="#src">Source map</a>
+    </nav>
+  </header>
+
+  <section id="actors">
+    <h2>Four actors</h2>
+    <div class="prose">
+      <p>Single-tablet writes already get atomicity from Raft and the WriteOp path (part 5). A transaction needs something above that: a durable record of "this transaction is open / committing / done" that survives failures, and a way to tell every tablet touched what the outcome is. Kudu builds this out of its own parts.</p>
+      <p><strong>TxnManager</strong> is a service on the masters. Clients talk only to it; it hands out transaction IDs and forwards each request to the right place. <strong>The transaction status table</strong> is a special, system-created Kudu table (range partitioned by transaction ID). Its tablets are replicated with Raft like any other, and each hosts a <strong>TxnStatusManager</strong> in its leader, which holds the state of the transactions in that ID range. <strong>Participants</strong> are the ordinary data tablets that received writes for the transaction. The <strong>client</strong> writes rows straight to the tablet servers as usual.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 -30 980 470" role="img" aria-label="Client talks to TxnManager on the master, which talks to the transaction status tablet; the status tablet's TxnStatusManager sends commit and abort operations to participant data tablets; the client also writes rows directly to the participants.">
+        <defs><marker id="t1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-client" x="30" y="150" width="170" height="100" rx="8"/><text class="t c" x="115" y="192">Client</text><text class="s c" x="115" y="212">KuduTransaction</text><text class="s c" x="115" y="228">+ KuduSession</text>
+
+        <rect class="grp" x="300" y="20" width="250" height="130" rx="10"/><text class="s" x="312" y="38">Master</text>
+        <rect class="b-master" x="330" y="50" width="190" height="76" rx="6"/><text class="t c" x="425" y="82">TxnManager</text><text class="s c" x="425" y="102">begin, commit, abort,</text><text class="s c" x="425" y="116">keepalive, get state</text>
+
+        <rect class="grp" x="300" y="190" width="250" height="190" rx="10"/><text class="s" x="312" y="208">Tablet server (status tablet leader)</text>
+        <rect class="b-raft" x="330" y="222" width="190" height="64" rx="6"/><text class="t c" x="425" y="248">Txn status tablet</text><text class="s c" x="425" y="268">Raft-replicated, 3 copies</text>
+        <rect class="b-ts" x="330" y="298" width="190" height="64" rx="6"/><text class="t c" x="425" y="324">TxnStatusManager</text><text class="s c" x="425" y="344">state machine + commit tasks</text>
+
+        <rect class="b-ts" x="720" y="40" width="230" height="100" rx="8"/><text class="t c" x="835" y="68">Participant tablet A</text><text class="s c" x="835" y="90">transactional MemRowSet</text><text class="s c" x="835" y="106">txn state: Open</text>
+        <rect class="b-ts" x="720" y="160" width="230" height="100" rx="8"/><text class="t c" x="835" y="188">Participant tablet B</text><text class="s c" x="835" y="210">transactional MemRowSet</text><text class="s c" x="835" y="226">txn state: Open</text>
+        <rect class="b-ts" x="720" y="280" width="230" height="100" rx="8"/><text class="t c" x="835" y="308">Participant tablet C</text><text class="s c" x="835" y="330">transactional MemRowSet</text><text class="s c" x="835" y="346">txn state: Open</text>
+
+        <path class="ln" marker-end="url(#t1)" d="M200 175 C 250 150, 270 110, 328 92"/><text class="s h" x="215" y="140">① begin / commit</text>
+        <path class="ln" marker-end="url(#t1)" d="M425 128 V 220"/><text class="s h" x="436" y="176">② forwarded</text>
+        <path class="ln" marker-end="url(#t1)" d="M425 288 V 296"/>
+        <path class="ln-r" marker-end="url(#t1)" d="M520 330 C 620 330, 650 250, 718 230"/><text class="s h" x="578" y="318">④ BEGIN_COMMIT,</text><text class="s h" x="578" y="334">FINALIZE_COMMIT</text>
+        <path class="ln-r" marker-end="url(#t1)" d="M520 320 C 640 340, 650 350, 718 345"/>
+        <path class="ln-r" marker-end="url(#t1)" d="M520 310 C 640 220, 650 120, 718 100"/>
+        <path class="ln-d" marker-end="url(#t1)" d="M200 205 C 300 172, 600 172, 718 205"/><text class="s h" x="590" y="172">③ rows (Write RPCs)</text>
+        <path class="ln-d" marker-end="url(#t1)" d="M200 240 C 260 430, 640 430, 718 372"/>
+        <path class="ln-d" marker-end="url(#t1)" d="M170 150 C 220 -40, 620 -40, 718 60"/>
+      </svg>
+      </div>
+      <figcaption>The client never sends data through the coordinator. Rows go directly to the data tablets (dashed grey); control messages go through TxnManager to the status tablet; the status tablet's leader then drives the participants (dashed rust) once the client asks to commit.</figcaption>
+    </figure>
+    <div class="note">The status table is created by the masters when the feature is first used. The relevant flags are experimental: <code>--txn_manager_enabled</code> is <strong>false</strong> by default, and the system client the tablet servers use to talk to participants is gated by <code>--enable_txn_system_client_init</code> (also false). A new range partition of <code>--txn_manager_status_table_range_partition_span</code> IDs (default 1,000,000) is added when TxnManager finds an ID with no tablet, and the table has <code>--txn_manager_status_table_num_replicas</code> = 3 replicas.</div>
+  </section>
+
+  <section id="states">
+    <h2>The coordinator's state machine</h2>
+    <div class="prose">
+      <p>For each transaction the TxnStatusManager keeps one entry (<code>TxnStatusEntryPB</code>): the state, the user who started it, the commit timestamp once chosen, and the list of participant tablets. Every change is a Raft write to the status tablet, so a new leader reloads exactly the same view.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 330" role="img" aria-label="State diagram: Open goes to Commit in progress, then Finalize in progress, then Committed. Open and Commit in progress can go to Abort in progress, then Aborted.">
+        <defs><marker id="t2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-master" x="20" y="60" width="140" height="60" rx="8"/><text class="t c" x="90" y="96">OPEN</text>
+        <rect class="b-master" x="250" y="60" width="170" height="60" rx="8"/><text class="t c" x="335" y="96">COMMIT_IN_PROGRESS</text>
+        <rect class="b-master" x="510" y="60" width="180" height="60" rx="8"/><text class="t c" x="600" y="96">FINALIZE_IN_PROGRESS</text>
+        <rect class="b-ts" x="790" y="60" width="150" height="60" rx="8"/><text class="t c" x="865" y="96">COMMITTED</text>
+        <rect class="b-raft" x="250" y="220" width="170" height="60" rx="8"/><text class="t c" x="335" y="256">ABORT_IN_PROGRESS</text>
+        <rect class="b-raft" x="580" y="220" width="150" height="60" rx="8"/><text class="t c" x="655" y="256">ABORTED</text>
+        <path class="ln" marker-end="url(#t2)" d="M160 90 H 248"/><text class="s c" x="204" y="80">BeginCommit</text>
+        <path class="ln" marker-end="url(#t2)" d="M420 90 H 508"/><text class="s c" x="464" y="52">all BEGIN_COMMIT</text><text class="s c" x="464" y="66">acked; ts = max</text>
+        <path class="ln" marker-end="url(#t2)" d="M690 90 H 788"/><text class="s c" x="739" y="52">all FINALIZE</text><text class="s c" x="739" y="66">acked</text>
+        <path class="ln-r" marker-end="url(#t2)" d="M90 120 C 90 200, 150 250, 248 250"/><text class="s" x="40" y="205">AbortTxn,</text><text class="s" x="40" y="219">stale, or error</text>
+        <path class="ln-r" marker-end="url(#t2)" d="M335 120 V 218"/><text class="s" x="345" y="175">a BEGIN_COMMIT fails</text><text class="s" x="345" y="190">or user aborts</text>
+        <path class="ln-r" marker-end="url(#t2)" d="M420 250 H 578"/><text class="s c" x="499" y="240">all ABORT_TXN acked</text>
+        <text class="s" x="20" y="320">Once FINALIZE_IN_PROGRESS is reached the outcome is fixed: there is no edge to abort. Terminal states: COMMITTED and ABORTED.</text>
+      </svg>
+      </div>
+      <figcaption>Two paths out of OPEN. The commit path is one-way after the commit timestamp is chosen; the abort path is available only until then. This matches the comment on <code>TxnStatePB</code> in <code>transactions.proto</code>.</figcaption>
+    </figure>
+  </section>
+
+  <section id="register">
+    <h2>Participants: joining a transaction</h2>
+    <div class="prose">
+      <p>The client does not tell the coordinator which tablets it will use. A tablet <strong>registers itself</strong> the first time it receives a write that carries a transaction ID. Until registration finishes the tablet holds the incoming writes back (up to <code>--tablet_max_pending_txn_write_ops</code> per transaction, default 2, then it tells the client to retry). The steps:</p>
+    </div>
+    <ol class="steps">
+      <li>A <code>Write</code> RPC with <code>txn_id</code> arrives at the leader of tablet A. A is not yet a participant, so the write is parked in a per-transaction dispatcher.</li>
+      <li>A asks the status tablet to <strong>register</strong> it as a participant. The coordinator checks that the transaction is still <code>OPEN</code> and records A in the entry. Registration after commit or abort began is refused.</li>
+      <li>A replicates a <code>BEGIN_TXN</code> op through its own Raft group. That creates the transaction on every replica of A, with a transactional MemRowSet for it.</li>
+      <li>The parked writes run, and so do later ones, which now skip the registration step.</li>
+    </ol>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 300" role="img" aria-label="Participant state machine: Initializing, Open, Commit in progress, Committed, with Aborted reachable from Initializing, Open and Commit in progress.">
+        <defs><marker id="t3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-disk" x="20" y="50" width="160" height="60" rx="8"/><text class="t c" x="100" y="86">kInitializing</text>
+        <rect class="b-ts" x="260" y="50" width="130" height="60" rx="8"/><text class="t c" x="325" y="86">kOpen</text>
+        <rect class="b-master" x="470" y="50" width="190" height="60" rx="8"/><text class="t c" x="565" y="86">kCommitInProgress</text>
+        <rect class="b-ts" x="750" y="50" width="170" height="60" rx="8"/><text class="t c" x="835" y="86">kCommitted</text>
+        <rect class="b-raft" x="400" y="200" width="170" height="60" rx="8"/><text class="t c" x="485" y="236">kAborted</text>
+        <path class="ln" marker-end="url(#t3)" d="M180 80 H 258"/><text class="s c" x="219" y="44">BEGIN_TXN</text>
+        <path class="ln" marker-end="url(#t3)" d="M390 80 H 468"/><text class="s c" x="429" y="44">BEGIN_COMMIT</text>
+        <path class="ln" marker-end="url(#t3)" d="M660 80 H 748"/><text class="s c" x="704" y="44">FINALIZE_COMMIT</text>
+        <path class="ln-r" marker-end="url(#t3)" d="M100 110 C 100 190, 250 230, 398 230"/>
+        <path class="ln-r" marker-end="url(#t3)" d="M325 110 V 160 C 325 190, 380 215, 398 220"/>
+        <path class="ln-r" marker-end="url(#t3)" d="M565 110 V 200"/>
+        <text class="s" x="580" y="170">ABORT_TXN</text>
+        <text class="s" x="20" y="285">Each transition is a Raft-replicated op on the participant; state is also persisted in the tablet metadata so a restart resumes where it was.</text>
+      </svg>
+      </div>
+      <figcaption>The five states in <code>tablet/txn_participant.h</code>. Illegal moves (for example BEGIN_COMMIT on a tablet that is already committed) are rejected as <code>TXN_ILLEGAL_STATE</code>; a repeated op that already applied returns <code>TXN_OP_ALREADY_APPLIED</code>, which makes retries by the coordinator safe.</figcaption>
+    </figure>
+  </section>
+
+  <section id="commit">
+    <h2>Commit: choosing one timestamp for everyone</h2>
+    <div class="prose">
+      <p>Think of a two-phase commit where the first phase gathers <em>timestamps</em> rather than votes. Every participant stamps its <code>BEGIN_COMMIT</code> op with a hybrid-clock timestamp (part 5). The coordinator picks the <strong>largest</strong> of them as the commit timestamp, so the commit time is later than every participant's own BEGIN_COMMIT. Then <code>FINALIZE_COMMIT</code> tells each participant the final value.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 520" role="img" aria-label="Sequence diagram of commit across client, TxnManager, status tablet, and two participants.">
+        <defs><marker id="t4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-client" x="30" y="14" width="120" height="40" rx="6"/><text class="t c" x="90" y="39">Client</text>
+        <rect class="b-master" x="210" y="14" width="140" height="40" rx="6"/><text class="t c" x="280" y="39">TxnManager</text>
+        <rect class="b-raft" x="410" y="14" width="160" height="40" rx="6"/><text class="t c" x="490" y="39">TxnStatusManager</text>
+        <rect class="b-ts" x="640" y="14" width="140" height="40" rx="6"/><text class="t c" x="710" y="39">Participant A</text>
+        <rect class="b-ts" x="820" y="14" width="140" height="40" rx="6"/><text class="t c" x="890" y="39">Participant B</text>
+        <path class="life" d="M90 54 V 505"/><path class="life" d="M280 54 V 505"/><path class="life" d="M490 54 V 505"/><path class="life" d="M710 54 V 505"/><path class="life" d="M890 54 V 505"/>
+
+        <path class="ln" marker-end="url(#t4)" d="M90 84 H 278"/><text class="s h" x="100" y="78">CommitTransaction</text>
+        <path class="ln" marker-end="url(#t4)" d="M280 108 H 488"/><text class="s h" x="300" y="102">forward to status tablet leader</text>
+        <rect class="b-raft" x="400" y="120" width="180" height="34" rx="4"/><text class="s c" x="490" y="142">state → COMMIT_IN_PROGRESS</text>
+        <path class="ln" marker-end="url(#t4)" d="M280 176 H 90" transform="translate(0,0)"/><text class="s h" x="130" y="170">accepted</text>
+
+        <path class="ln-r" marker-end="url(#t4)" d="M490 210 H 708"/><text class="s h" x="530" y="204">BEGIN_COMMIT</text>
+        <path class="ln-r" marker-end="url(#t4)" d="M490 226 H 888"/><text class="s h" x="770" y="220">BEGIN_COMMIT</text>
+        <rect class="b-ts" x="640" y="238" width="140" height="30" rx="4"/><text class="s c" x="710" y="258">Raft op, ts = 120</text>
+        <rect class="b-ts" x="820" y="238" width="140" height="30" rx="4"/><text class="s c" x="890" y="258">Raft op, ts = 135</text>
+        <path class="ln-r" marker-end="url(#t4)" d="M710 284 H 492"/><text class="s h" x="560" y="278">reply: 120</text>
+        <path class="ln-r" marker-end="url(#t4)" d="M890 304 H 492"/><text class="s h" x="760" y="298">reply: 135</text>
+
+        <rect class="b-raft" x="360" y="320" width="260" height="46" rx="4"/><text class="s c" x="490" y="340">commit ts = max(120, 135) = 135</text><text class="s c" x="490" y="356">state → FINALIZE_IN_PROGRESS (Raft)</text>
+
+        <path class="ln-r" marker-end="url(#t4)" d="M490 396 H 708"/><text class="s h" x="520" y="390">FINALIZE_COMMIT ts=135</text>
+        <path class="ln-r" marker-end="url(#t4)" d="M490 412 H 888"/><text class="s h" x="745" y="406">FINALIZE_COMMIT ts=135</text>
+        <rect class="b-ts" x="640" y="424" width="140" height="30" rx="4"/><text class="s c" x="710" y="444">kCommitted</text>
+        <rect class="b-ts" x="820" y="424" width="140" height="30" rx="4"/><text class="s c" x="890" y="444">kCommitted</text>
+        <path class="ln-r" marker-end="url(#t4)" d="M710 466 H 492"/><path class="ln-r" marker-end="url(#t4)" d="M890 478 H 492"/>
+        <rect class="b-ts" x="410" y="484" width="160" height="26" rx="4"/><text class="s c" x="490" y="502">state → COMMITTED</text>
+      </svg>
+      </div>
+      <figcaption>Participant timestamps (120, 135) are made-up numbers. The shape is the point: the coordinator persists each state change through Raft, so if its leader dies mid-protocol the next leader reloads the state and resends the missing ops, which participants treat idempotently.</figcaption>
+    </figure>
+    <div class="prose">
+      <p><strong>Failure handling.</strong> If a BEGIN_COMMIT cannot be delivered or fails, the coordinator moves to <code>ABORT_IN_PROGRESS</code> and sends <code>ABORT_TXN</code> to every participant, which drop the transaction's rows. After FINALIZE_IN_PROGRESS the coordinator retries until every participant accepts; the transaction is committed from that moment even if a tablet server is down, and that tablet will apply the commit when it returns. Background requests use <code>--txn_background_rpc_timeout_ms</code> (default 5000) and run on a pool of <code>--txn_commit_pool_num_threads</code> (default 10) threads on each tablet server.</p>
+      <p><strong>Waiting for it.</strong> The client's <code>Commit()</code> by default starts the commit and then polls until the state is <code>COMMITTED</code> (or fails if aborted). <code>StartCommit()</code> returns right away and <code>IsCommitComplete()</code> can be polled.</p>
+    </div>
+  </section>
+
+  <section id="visible">
+    <h2>What a reader sees</h2>
+    <div class="prose">
+      <p>Transactional rows are kept apart from normal rows until commit. Each tablet keeps the usual MemRowSet and, for each open transaction, a <strong>separate MemRowSet</strong> tied to a <code>TxnMetadata</code> record. A scan then asks one question about each transactional MemRowSet: <em>is this transaction committed as far as my snapshot is concerned?</em></p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 360" role="img" aria-label="A tablet holding the main MemRowSet, a per-transaction MemRowSet for an open transaction, committed transactional MemRowSets, and disk rowsets; below, a timeline shows BEGIN_COMMIT, commit timestamp, and scan snapshots before and after.">
+        <defs><marker id="t5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="grp" x="20" y="14" width="940" height="140" rx="10"/><text class="s" x="32" y="32">One tablet replica</text>
+        <rect class="b-ts" x="40" y="44" width="190" height="90" rx="6"/><text class="t c" x="135" y="72">MemRowSet</text><text class="s c" x="135" y="92">normal writes</text><text class="s c" x="135" y="108">always visible by MVCC</text>
+        <rect class="b-raft" x="260" y="44" width="210" height="90" rx="6"/><text class="t c" x="365" y="72">txn 17 MemRowSet</text><text class="s c" x="365" y="92">transaction still open</text><text class="s c" x="365" y="108">invisible to every scan</text>
+        <rect class="b-master" x="500" y="44" width="220" height="90" rx="6"/><text class="t c" x="610" y="72">committed txn MemRowSets</text><text class="s c" x="610" y="92">visible if commit ts is</text><text class="s c" x="610" y="108">inside the scan snapshot</text>
+        <rect class="b-disk" x="750" y="44" width="190" height="90" rx="6"/><text class="t c" x="845" y="72">DiskRowSets</text><text class="s c" x="845" y="92">written with the real</text><text class="s c" x="845" y="108">commit timestamp</text>
+        <path class="ln" marker-end="url(#t5)" d="M720 90 H 748"/><text class="s c" x="735" y="148">flush</text>
+
+        <path class="ln" d="M60 250 H 920"/>
+        <path class="life" d="M240 220 V 290"/><path class="life" d="M470 220 V 290"/><path class="life" d="M700 220 V 290"/>
+        <circle cx="240" cy="250" r="5" fill="var(--ts)"/><text class="s c" x="240" y="212">BEGIN_COMMIT</text><text class="s c" x="240" y="308">participant ts 120</text>
+        <circle cx="470" cy="250" r="5" fill="var(--raft)"/><text class="s c" x="470" y="212">commit ts = 135</text><text class="s c" x="470" y="308">max of all participants</text>
+        <circle cx="700" cy="250" r="5" fill="var(--master)"/><text class="s c" x="700" y="212">FINALIZE_COMMIT applied</text><text class="s c" x="700" y="308">txn marked committed</text>
+        <text class="s" x="60" y="240">scan at ts 100: not visible</text>
+        <text class="s" x="250" y="274">scan at ts 128: not visible</text>
+        <text class="s" x="520" y="274">scan at ts ≥ 135: visible</text>
+        <text class="s" x="60" y="345">A snapshot scan at ts ≥ 135 waits until all ops before it are applied, so it cannot start before FINALIZE_COMMIT lands on this tablet.</text>
+      </svg>
+      </div>
+      <figcaption>Why the maximum timestamp is enough: a scan at time t waits for MVCC ops earlier than t to apply (part 5). Since 135 is later than every BEGIN_COMMIT, any scan that could include the transaction must wait for that tablet's FINALIZE_COMMIT first.</figcaption>
+    </figure>
+    <div class="prose">
+      <p>The rule differs a little by read mode: for <strong>timestamp snapshots</strong> (<code>READ_AT_SNAPSHOT</code>, <code>READ_YOUR_WRITES</code>, diff scans) the transaction must be committed <em>and</em> its commit timestamp must fall inside the snapshot; for <strong><code>READ_LATEST</code></strong> it is enough that the BEGIN_COMMIT op has been applied, because Kudu applies it only after FINALIZE_COMMIT has replicated. Once a BEGIN_COMMIT has replicated, the tablet refuses more writes for that transaction.</p>
+      <p><strong>Memory and flushing.</strong> A transaction's MemRowSet is not flushed while the transaction is open. After commit, all committed transactional MemRowSets are flushed together, like a merge compaction, and each row gets the commit timestamp on disk; scans of disk data then never need the transaction metadata. Their memory counts together for the flush decision (part 7).</p>
+    </div>
+  </section>
+
+  <section id="locks">
+    <h2>Locking: one transaction per tablet at a time</h2>
+    <div class="prose">
+      <p>Besides the per-row locks every write takes, a transaction takes a <strong>partition lock</strong> on the whole tablet, and each tablet has exactly one. This is what gives the "at most one open transaction per tablet" limit. To avoid deadlock Kudu uses the wait-die rule on transaction IDs (smaller means older). When a request cannot get the lock within about a second:</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 280" role="img" aria-label="Wait-die: a requester with a higher transaction ID than the holder is told to abort; a requester with a lower ID retries.">
+        <defs><marker id="t6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-raft" x="380" y="20" width="220" height="70" rx="8"/><text class="t c" x="490" y="48">Tablet partition lock</text><text class="s c" x="490" y="68">held by txn 40</text>
+        <rect class="b-master" x="40" y="170" width="260" height="80" rx="8"/><text class="t c" x="170" y="196">txn 55 asks</text><text class="s c" x="170" y="216">55 &gt; 40: younger</text><text class="s c" x="170" y="232">TXN_LOCKED_ABORT: dies</text>
+        <rect class="b-ts" x="360" y="170" width="260" height="80" rx="8"/><text class="t c" x="490" y="196">txn 40 asks again</text><text class="s c" x="490" y="216">same ID: lock re-entered</text><text class="s c" x="490" y="232">(reference-counted)</text>
+        <rect class="b-ts" x="680" y="170" width="260" height="80" rx="8"/><text class="t c" x="810" y="196">txn 12 asks</text><text class="s c" x="810" y="216">12 &lt; 40: older</text><text class="s c" x="810" y="232">TXN_LOCKED_RETRY_OP: waits</text>
+        <path class="ln-r" marker-end="url(#t6)" d="M170 168 C 170 130, 300 110, 378 80"/>
+        <path class="ln" marker-end="url(#t6)" d="M490 168 V 92"/>
+        <path class="ln-d" marker-end="url(#t6)" d="M810 168 C 810 130, 680 110, 602 80"/>
+      </svg>
+      </div>
+      <figcaption>The younger requester aborts itself, so no cycle can form; the older one retries. A non-transactional write counts as the largest possible ID: it waits for a transaction and may be told to abort when a transaction holds the lock, since transactions are more costly to retry. The source notes this can starve non-transactional writers.</figcaption>
+    </figure>
+  </section>
+
+  <section id="alive">
+    <h2>Heartbeats and abandoned transactions</h2>
+    <div class="prose">
+      <p>A client that crashes would leave a transaction open and its tablets locked forever. So an open transaction must be kept alive. A handle created by <code>NewTransaction()</code> sends keepalive messages from a background thread at an interval related to <code>--txn_keepalive_interval_ms</code> (default 30 s). The status manager runs a <strong>staleness tracker</strong> every <code>--txn_staleness_tracker_interval_ms</code> (default 10 s); a transaction with no keepalive for longer than the keepalive interval is aborted automatically, which releases the tablets' locks. Setting the tracker interval to 0 disables it.</p>
+      <p>A transaction can also be handed to another process (for example a Spark driver giving work to executors) by serializing the handle into a token. Whether the copy sends keepalives is a serialization option, off by default: the original handle should keep the transaction alive while workers write.</p>
+    </div>
+  </section>
+
+  <section id="api">
+    <h2>Using it from the client</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Call</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>client-&gt;NewTransaction(&amp;txn)</code></td><td>asks TxnManager to begin a transaction and returns a <code>KuduTransaction</code>; starts keepalives</td></tr>
+          <tr><td><code>txn-&gt;CreateSession(&amp;session)</code></td><td>a <code>KuduSession</code> whose writes carry the transaction ID; several sessions, even in other threads, may share one transaction</td></tr>
+          <tr><td><code>txn-&gt;Commit()</code></td><td>starts commit and waits until it is complete</td></tr>
+          <tr><td><code>txn-&gt;StartCommit()</code> and <code>IsCommitComplete()</code></td><td>asynchronous form of the above</td></tr>
+          <tr><td><code>txn-&gt;Rollback()</code></td><td>aborts the transaction</td></tr>
+          <tr><td><code>txn-&gt;Serialize()</code> and <code>KuduTransaction::Deserialize()</code></td><td>pass the transaction to another client process, optionally with keepalive enabled</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>The TxnManager RPCs behind these are <code>BeginTransaction</code>, <code>CommitTransaction</code>, <code>AbortTransaction</code>, <code>GetTransactionState</code> and <code>KeepTransactionAlive</code> (<code>master/txn_manager.proto</code>). The <code>kudu txn</code> CLI tool can list transactions from the status table.</p>
+    </div>
+  </section>
+
+  <section id="limits">
+    <h2>Limits and caveats</h2>
+    <ul class="steps">
+      <li><strong>Experimental.</strong> The feature flags above are tagged experimental or hidden, and the master side is off by default. Check <code>docs/transaction_semantics.adoc</code> in your release for the supported statement.</li>
+      <li><strong>Inserts only.</strong> According to the design doc, transactions support <code>INSERT</code> (and <code>INSERT_IGNORE</code>); updates and deletes of rows inside a transaction are not supported yet. I did not exhaustively confirm in the code which operation types are rejected.</li>
+      <li><strong>One transaction per tablet at a time</strong>, because of the partition lock. Two concurrent transactions that touch the same tablet conflict, and the younger one aborts.</li>
+      <li><strong>Isolation.</strong> Reads outside the transaction see committed data under the usual snapshot rules; the documented guarantees are atomicity and visibility at the commit timestamp, not serializability. Read <code>transaction_semantics.adoc</code> for the exact statement, including what a transaction can read of its own writes.</li>
+      <li><strong>Cost.</strong> Commit touches the status tablet several times (each state change is a Raft write) and every participant twice. It is meant for batches, not for single-row work.</li>
+    </ul>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Flag</th><th>Default</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td><code>--txn_manager_enabled</code></td><td>false</td><td>turn TxnManager on (masters)</td></tr>
+          <tr><td><code>--txn_manager_lazily_initialized</code></td><td>true</td><td>create the status table on first request instead of at start</td></tr>
+          <tr><td><code>--txn_manager_status_table_num_replicas</code></td><td>3</td><td>replicas of the status table</td></tr>
+          <tr><td><code>--enable_txn_system_client_init</code></td><td>false</td><td>tablet servers create the internal client for registration and commit tasks</td></tr>
+          <tr><td><code>--txn_keepalive_interval_ms</code></td><td>30000</td><td>longest allowed gap between keepalives</td></tr>
+          <tr><td><code>--txn_staleness_tracker_interval_ms</code></td><td>10000</td><td>how often abandoned transactions are looked for; 0 = never</td></tr>
+          <tr><td><code>--txn_background_rpc_timeout_ms</code></td><td>5000</td><td>timeout for coordinator → participant requests</td></tr>
+          <tr><td><code>--txn_commit_pool_num_threads</code></td><td>10</td><td>commit/abort task threads per tablet server</td></tr>
+          <tr><td><code>--txn_participant_registration_pool_num_threads</code></td><td>10</td><td>threads that register tablets as participants</td></tr>
+          <tr><td><code>--tablet_max_pending_txn_write_ops</code></td><td>2</td><td>writes parked per transaction while a tablet registers</td></tr>
+          <tr><td><code>--txn_status_tablet_failover_catchup_timeout_ms</code></td><td>30000</td><td>time a new status-tablet leader has to load state</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="src">
+    <h2>Where to read the code</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>File</th><th>What is in it</th></tr></thead>
+        <tbody>
+          <tr><td><code>docs/design-docs/transactions.adoc</code>, <code>docs/transaction_semantics.adoc</code></td><td>design and user-facing semantics</td></tr>
+          <tr><td><code>master/txn_manager.{h,cc}</code>, <code>txn_manager.proto</code></td><td>the TxnManager service</td></tr>
+          <tr><td><code>transactions/txn_status_manager.cc</code></td><td>coordinator state machine, staleness tracker, commit and abort tasks</td></tr>
+          <tr><td><code>transactions/txn_status_tablet.cc</code>, <code>txn_status_entry.cc</code></td><td>persisting entries in the status tablet</td></tr>
+          <tr><td><code>transactions/coordinator_rpc.cc</code>, <code>participant_rpc.cc</code>, <code>txn_system_client.cc</code></td><td>RPCs between tablet servers and participants</td></tr>
+          <tr><td><code>transactions/transactions.proto</code></td><td><code>TxnStatePB</code> and the status entry</td></tr>
+          <tr><td><code>tablet/txn_participant.h</code>, <code>tablet/ops/participant_op.cc</code></td><td>participant states and BEGIN_TXN / BEGIN_COMMIT / FINALIZE_COMMIT / ABORT_TXN ops</td></tr>
+          <tr><td><code>tablet/lock_manager.cc</code></td><td>partition lock and wait-die</td></tr>
+          <tr><td><code>tablet/tablet_replica.cc</code></td><td>the per-transaction op dispatcher that parks writes during registration</td></tr>
+          <tr><td><code>client/client.h</code> (<code>KuduTransaction</code>)</td><td>the client API</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
