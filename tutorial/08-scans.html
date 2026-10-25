@@ -1,0 +1,483 @@
+<title>Kudu Scans Tutorial</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column; wide figures scroll inside their own frame on phones.
+   Palette is keyed to the roles in the system: client (ochre), master (indigo), tablet server (teal), Raft/WAL (rust), disk (slate). */
+:root {
+  --bg: #f4f7f8; --surf: #ffffff; --fg: #14212b; --muted: #55646e; --line: #d0d9df; --line2: #8fa0ab;
+  --client: #a9680f; --client-t: #fbeed6;
+  --master: #4a4db8; --master-t: #e6e7fa;
+  --ts: #0d7566; --ts-t: #d9f1ed;
+  --raft: #bb4a22; --raft-t: #fae3d9;
+  --disk: #52646f; --disk-t: #e6ecef;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+    --client: #e3ad50; --client-t: #3a2f17;
+    --master: #a1a3f5; --master-t: #25284d;
+    --ts: #4fc9b4; --ts-t: #11322d;
+    --raft: #f2905f; --raft-t: #3d2218;
+    --disk: #a3b4bf; --disk-t: #22323c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+  --client: #e3ad50; --client-t: #3a2f17;
+  --master: #a1a3f5; --master-t: #25284d;
+  --ts: #4fc9b4; --ts-t: #11322d;
+  --raft: #f2905f; --raft-t: #3d2218;
+  --disk: #a3b4bf; --disk-t: #22323c;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.65 var(--body);
+  padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.prose { max-width: 68ch; display: flex; flex-direction: column; gap: 12px; }
+p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.1rem; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+code { font: 500 .88em var(--mono); background: var(--disk-t); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--master); }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { background: var(--surf); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { font-size: .92rem; color: var(--muted); max-width: 78ch; }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.role { background: var(--surf); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role h3 { color: var(--c); }
+.role p, .role li { font-size: .95rem; }
+.role ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; max-width: 76ch; }
+.note { border-left: 3px solid var(--raft); padding: 4px 0 4px 14px; color: var(--muted); max-width: 68ch; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font: 500 13px var(--mono); text-decoration: none; color: var(--fg); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+/* SVG vocabulary */
+svg text { font-family: var(--body); fill: var(--fg); font-size: 13px; }
+svg .t { font-weight: 600; }
+svg .s { font-size: 11.5px; fill: var(--muted); }
+svg .m { font-family: var(--mono); font-size: 11.5px; }
+svg .h { paint-order: stroke; stroke: var(--surf); stroke-width: 5px; stroke-linejoin: round; }
+svg .c { text-anchor: middle; }
+svg .e { text-anchor: end; }
+svg .box { fill: var(--surf); stroke: var(--line2); stroke-width: 1.4; }
+svg .grp { fill: none; stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .b-client { fill: var(--client-t); stroke: var(--client); stroke-width: 1.5; }
+svg .b-master { fill: var(--master-t); stroke: var(--master); stroke-width: 1.5; }
+svg .b-ts { fill: var(--ts-t); stroke: var(--ts); stroke-width: 1.5; }
+svg .b-raft { fill: var(--raft-t); stroke: var(--raft); stroke-width: 1.5; }
+svg .b-disk { fill: var(--disk-t); stroke: var(--disk); stroke-width: 1.5; }
+svg .solid-ts { fill: var(--ts); stroke: var(--ts); }
+svg .solid-ts + text, svg text.on { fill: var(--surf); }
+svg .ln { fill: none; stroke: currentColor; stroke-width: 1.5; }
+svg .ln-r { fill: none; stroke: var(--raft); stroke-width: 1.6; stroke-dasharray: 6 4; }
+svg .ln-d { fill: none; stroke: var(--line2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+svg .life { stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 3 5; }
+</style>
+
+<main>
+  <header class="prose">
+    <span class="eyebrow">Learning Kudu · Part 8</span>
+    <h1>How a scan works</h1>
+    <p class="lede">A scan is how every query reads Kudu, whether it comes from Impala, Spark or your own code. The system's design choices from earlier parts all pay off here: columnar files, row numbers, MVCC snapshots, bloom filters and partition rules. This part follows a scan from the client's options to the bytes of one column block, and shows where each filter prunes work.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#path">The path</a><a href="#options">Options</a><a href="#prune">Choosing tablets</a><a href="#tokens">Scan tokens</a><a href="#open">Opening</a><a href="#snapshot">Snapshots</a><a href="#tree">Iterators</a><a href="#batch">One batch</a><a href="#funnel">Pushdown</a><a href="#loop">Batches and TTL</a><a href="#ft">Failure</a><a href="#slow">Slow scans</a><a href="#src">Source map</a>
+    </nav>
+  </header>
+
+  <section id="path">
+    <h2>The path of a scan</h2>
+    <div class="prose">
+      <p>A scan covers a range of a table, so it usually touches many tablets, but it reads <em>one tablet at a time</em> through one scanner object. The client walks the tablets, and for each one it opens a server-side scanner, pulls batches until the tablet is exhausted, and moves on. On the server a scan is a tree of iterators that read rows in blocks of 128.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 520" role="img" aria-label="Client scanner loops over tablets selected by a partition pruner; for each tablet it sends a Scan RPC to a tablet server, which builds an iterator tree over the MemRowSet and DiskRowSets, filters and serializes row blocks, and returns batches.">
+        <defs><marker id="h1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="grp" x="10" y="10" width="360" height="500" rx="10"/><text class="t" x="26" y="36">Client: KuduScanner</text>
+        <rect class="b-client" x="26" y="52" width="328" height="70" rx="5"/><text class="t" x="38" y="74">Scan configuration</text><text class="s" x="38" y="94">projection, predicates, key bounds, read mode,</text><text class="s" x="38" y="110">order, limit, batch size, fault tolerance</text>
+        <rect class="b-client" x="26" y="138" width="328" height="70" rx="5"/><text class="t" x="38" y="160">Partition pruner</text><text class="s" x="38" y="180">which tablets could hold matching rows?</text><text class="s" x="38" y="196">the rest are never contacted</text>
+        <rect class="b-client" x="26" y="224" width="328" height="70" rx="5"/><text class="t" x="38" y="246">For each remaining tablet, in key order</text><text class="s" x="38" y="266">MetaCache: leader or closest replica;</text><text class="s" x="38" y="282">open a scanner, then NextBatch() until done</text>
+        <rect class="b-client" x="26" y="310" width="328" height="70" rx="5"/><text class="t" x="38" y="332">Row batches to the application</text><text class="s" x="38" y="352">rows decoded from the response sidecars</text><text class="s" x="38" y="368">in the projection's column order</text>
+        <rect class="b-disk" x="26" y="396" width="328" height="100" rx="5"/><text class="t" x="38" y="418">Parallel scans use tokens</text><text class="s" x="38" y="438">Spark and Impala split the work with scan</text><text class="s" x="38" y="454">tokens, one scanner per token, run on many</text><text class="s" x="38" y="470">workers (next sections).</text>
+        <path class="ln" marker-end="url(#h1)" d="M190 122 V136"/><path class="ln" marker-end="url(#h1)" d="M190 208 V222"/><path class="ln" marker-end="url(#h1)" d="M190 294 V308"/>
+
+        <rect class="grp" x="440" y="10" width="530" height="500" rx="10"/><text class="t" x="456" y="36">Tablet server, one tablet</text>
+        <rect class="b-master" x="456" y="52" width="498" height="52" rx="5"/><text class="t" x="468" y="74">TabletServiceImpl::Scan</text><text class="s" x="468" y="92">new scan request, or continue with a scanner id and call sequence number</text>
+        <rect class="b-master" x="456" y="116" width="498" height="52" rx="5"/><text class="t" x="468" y="138">ScannerManager</text><text class="s" x="468" y="156">registers the scanner with a 60 s idle timeout; builds the ScanSpec</text>
+        <rect class="b-ts" x="456" y="180" width="498" height="52" rx="5"/><text class="t" x="468" y="202">Snapshot and iterator tree</text><text class="s" x="468" y="220">pick the MVCC snapshot; Union or Merge iterator over MemRowSet and DiskRowSets</text>
+        <rect class="b-ts" x="456" y="244" width="498" height="74" rx="5"/><text class="t" x="468" y="266">Per DiskRowSet</text><text class="s" x="468" y="286">key bounds → row range · predicate columns first · apply UNDO and REDO deltas</text><text class="s" x="468" y="304">for the snapshot · read the remaining projected columns</text>
+        <rect class="b-ts" x="456" y="330" width="498" height="52" rx="5"/><text class="t" x="468" y="352">RowBlock of up to 128 rows + selection vector</text><text class="s" x="468" y="370">repeated until the batch reaches its byte size or 500 ms pass</text>
+        <rect class="b-raft" x="456" y="394" width="498" height="52" rx="5"/><text class="t" x="468" y="416">Result serializer</text><text class="s" x="468" y="434">rows and indirect data as RPC sidecars (or a columnar layout); has_more_results</text>
+        <rect class="b-disk" x="456" y="458" width="498" height="40" rx="5"/><text class="s" x="468" y="482">response also carries a propagated timestamp and, for snapshots, the snapshot timestamp</text>
+        <path class="ln" marker-end="url(#h1)" d="M354 259 H 454"/><text class="s h" x="366" y="250">Scan</text>
+        <path class="ln-d" marker-end="url(#h1)" d="M454 345 H 356"/><text class="s h" x="366" y="338">batch</text>
+        <path class="ln" marker-end="url(#h1)" d="M705 104 V114" /><path class="ln" marker-end="url(#h1)" d="M705 168 V178"/><path class="ln" marker-end="url(#h1)" d="M705 232 V242"/><path class="ln" marker-end="url(#h1)" d="M705 318 V328"/><path class="ln" marker-end="url(#h1)" d="M705 382 V392"/>
+      </svg>
+      </div>
+      <figcaption>The default scan reads the leader's latest committed data, unordered, one batch of about 1 MiB per round trip. Every other behavior in this part is a change to some box in this picture.</figcaption>
+    </figure>
+  </section>
+
+  <section id="options">
+    <h2>What the client decides</h2>
+    <div class="prose">
+      <p>A <code>KuduScanner</code> is configured before it is opened. These settings decide which of the guarantees and costs below you get.</p>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Setting</th><th>Choices (default first)</th><th>What it changes</th></tr></thead>
+        <tbody>
+          <tr><td>Projection</td><td>all columns, or a list</td><td>Only these column files are read. Always set it.</td></tr>
+          <tr><td>Predicates</td><td>none, or per column: equality, range, IN list, null checks, bloom filter</td><td>Pruning of tablets, rowsets and rows; see the funnel below.</td></tr>
+          <tr><td>Key bounds</td><td>none, or lower and exclusive upper primary key</td><td>Narrows tablets and the row range inside each rowset.</td></tr>
+          <tr><td>Read mode</td><td><code>READ_LATEST</code>, <code>READ_AT_SNAPSHOT</code>, <code>READ_YOUR_WRITES</code></td><td>Which versions are visible, and whether the server waits.</td></tr>
+          <tr><td>Order</td><td>unordered, or ordered by primary key</td><td>Ordered needs a snapshot mode and a merge across rowsets.</td></tr>
+          <tr><td>Replica selection</td><td><code>LEADER_ONLY</code>, <code>CLOSEST_REPLICA</code>, <code>FIRST_REPLICA</code></td><td>Where the scan runs; non-leaders need a snapshot read.</td></tr>
+          <tr><td>Fault tolerance</td><td>off, or on</td><td>On: resume on another replica after a failure; implies an ordered snapshot read.</td></tr>
+          <tr><td>Batch size</td><td>server default 1 MiB, up to 8 MiB</td><td>Rows per round trip; fewer round trips against more memory.</td></tr>
+          <tr><td>Limit</td><td>none, or N rows</td><td>The server stops when it has returned N rows.</td></tr>
+          <tr><td>Cache blocks</td><td>true</td><td>Whether blocks read go into the block cache (Part 7).</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="prune">
+    <h2>Choosing which tablets to ask</h2>
+    <div class="prose">
+      <p>Before sending any RPC, the client works out which tablets can possibly contain matching rows, using the table's partition schema from Part 3. This is <strong>partition pruning</strong>. It is the cheapest filter in the whole system, because the tablets it removes cost nothing at all.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 440" role="img" aria-label="A table with two hash buckets and two time ranges has four tablets A to D; three queries and the tablets each keeps: time below 500 keeps A and C, host and metric equality keeps C and D, both keep only C.">
+        <text class="s" x="20" y="22">TABLE machine_metrics: PRIMARY KEY (host, metric, time), HASH (host, metric) INTO 2 BUCKETS, RANGE (time) SPLIT AT 1451606400000</text>
+        <text class="s c" x="190" y="52">time &lt; 1451606400000</text><text class="s c" x="340" y="52">time ≥ 1451606400000</text>
+        <text class="s e" x="104" y="84">bucket 0</text><text class="s e" x="104" y="124">bucket 1</text>
+        <rect class="box" x="110" y="60" width="160" height="34" rx="3"/><text class="t c" x="190" y="82">A</text>
+        <rect class="box" x="280" y="60" width="120" height="34" rx="3"/><text class="t c" x="340" y="82">B</text>
+        <rect class="box" x="110" y="100" width="160" height="34" rx="3"/><text class="t c" x="190" y="122">C</text>
+        <rect class="box" x="280" y="100" width="120" height="34" rx="3"/><text class="t c" x="340" y="122">D</text>
+
+        <text class="t" x="440" y="52">Query 1: WHERE time &lt; 500</text>
+        <text class="s" x="440" y="72">Range pruning on the time column.</text><text class="s" x="440" y="88">Tablets B and D start at or after 1451606400000:</text><text class="s" x="440" y="104" fill="var(--ts)">keep A, C. Skip B, D.</text>
+        <text class="t" x="440" y="144">Query 2: WHERE host = 'web-3' AND metric = 'cpu'</text>
+        <text class="s" x="440" y="164">Hash pruning: hashing both columns gives bucket 1.</text><text class="s" x="440" y="180" fill="var(--ts)">keep C, D. Skip A, B.</text>
+        <text class="t" x="440" y="220">Query 3: both of the above</text>
+        <text class="s" x="440" y="240" fill="var(--ts)">keep C only.</text>
+
+        <g><rect class="b-ts" x="800" y="40" width="60" height="22" rx="2"/><text class="s c" x="830" y="56">A</text><rect class="b-disk" x="864" y="40" width="60" height="22" rx="2" style="fill-opacity:.4"/><text class="s c" x="894" y="56">B</text><rect class="b-ts" x="800" y="66" width="60" height="22" rx="2"/><text class="s c" x="830" y="82">C</text><rect class="b-disk" x="864" y="66" width="60" height="22" rx="2" style="fill-opacity:.4"/><text class="s c" x="894" y="82">D</text><rect class="b-disk" x="800" y="124" width="60" height="22" rx="2" style="fill-opacity:.4"/><text class="s c" x="830" y="140">A</text><rect class="b-disk" x="864" y="124" width="60" height="22" rx="2" style="fill-opacity:.4"/><text class="s c" x="894" y="140">B</text><rect class="b-ts" x="800" y="150" width="60" height="22" rx="2"/><text class="s c" x="830" y="166">C</text><rect class="b-ts" x="864" y="150" width="60" height="22" rx="2"/><text class="s c" x="894" y="166">D</text><rect class="b-disk" x="800" y="196" width="60" height="22" rx="2" style="fill-opacity:.4"/><text class="s c" x="830" y="212">A</text><rect class="b-disk" x="864" y="196" width="60" height="22" rx="2" style="fill-opacity:.4"/><text class="s c" x="894" y="212">B</text><rect class="b-ts" x="800" y="222" width="60" height="22" rx="2"/><text class="s c" x="830" y="238">C</text><rect class="b-disk" x="864" y="222" width="60" height="22" rx="2" style="fill-opacity:.4"/><text class="s c" x="894" y="238">D</text></g>
+        <rect class="b-master" x="20" y="262" width="940" height="170" rx="6"/><text class="t" x="34" y="286">Other ways the client narrows tablets</text>
+        <text class="s" x="34" y="308">· <tspan class="t">Primary key bounds.</tspan> If the range partition columns are a prefix of the key, the scan's lower and upper key bound compare directly with each tablet's range.</text>
+        <text class="s" x="34" y="328">· <tspan class="t">Lifting and pushing.</tspan> The client turns key bounds into column predicates, and column predicates into key bounds, so each form helps the other prune.</text>
+        <text class="s" x="34" y="348">· <tspan class="t">IN lists.</tspan> Each value in an IN list is hashed; buckets that no value can reach are skipped, and each tablet keeps only the values that belong to it.</text>
+        <text class="s" x="34" y="372">Pruning can only use what the predicates say about the partition columns. A predicate on a non-partition column, such as value &gt; 5, cannot remove any tablet,</text>
+        <text class="s" x="34" y="388">and a predicate on only one of two hashed columns cannot choose a bucket. That is why partition design (Part 3) should follow the common filters.</text>
+        <text class="s" x="34" y="412">The server repeats a version of the same test on its own tablet and drops IN-list values that do not belong to it.</text>
+      </svg>
+      </div>
+      <figcaption>The design doc <code>docs/design-docs/scan-optimization-partition-pruning.md</code> works through more cases. In the code, <code>client/scanner-internal.cc</code> keeps a pruner and removes each partition range as the scan finishes with that tablet.</figcaption>
+    </figure>
+  </section>
+
+  <section id="tokens">
+    <h2>Scan tokens: splitting a scan across workers</h2>
+    <div class="prose">
+      <p>A distributed engine wants to cut a table scan into tasks, ship each task to a worker, and run them in parallel, ideally on the machine that holds a replica. A <strong>scan token</strong> is a small serialized description of one such task. It carries the table, projection, predicates, snapshot choice and a partition key range, so any process with a Kudu client can rebuild a scanner from it.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 330" role="img" aria-label="A planner builds scan tokens, one per surviving tablet, each with location hints; tokens are serialized and sent to workers, which turn each into a scanner.">
+        <defs><marker id="h2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-client" x="20" y="30" width="250" height="150" rx="6"/><text class="t" x="34" y="54">Planner (driver)</text><text class="s" x="34" y="76">ScanTokenBuilder: table,</text><text class="s" x="34" y="92">projection, predicates,</text><text class="s" x="34" y="108">snapshot time, bounds.</text><text class="s" x="34" y="132">Prunes tablets (above),</text><text class="s" x="34" y="148">asks the master for locations,</text><text class="s" x="34" y="164">builds one token per tablet.</text>
+        <path class="ln" marker-end="url(#h2)" d="M270 105 H 330"/>
+        <rect class="b-ts" x="332" y="30" width="270" height="150" rx="6"/><text class="t" x="346" y="54">ScanToken</text><text class="s" x="346" y="76">opaque bytes, same format for</text><text class="s" x="346" y="92">the C++, Java and Python clients</text><text class="s" x="346" y="116">+ a location hint: the replicas</text><text class="s" x="346" y="132">that hold the data</text><text class="s" x="346" y="156">limited by partition key range,</text><text class="s" x="346" y="172">not by tablet id</text>
+        <path class="ln" marker-end="url(#h2)" d="M602 105 H 662"/>
+        <rect class="b-master" x="664" y="30" width="296" height="150" rx="6"/><text class="t" x="678" y="54">Workers (executors, Impala daemons)</text><text class="s" x="678" y="76">deserialize the token into a</text><text class="s" x="678" y="92">KuduScanner and run it. Placing</text><text class="s" x="678" y="108">the task on a host that has a</text><text class="s" x="678" y="124">replica makes the read local.</text><text class="s" x="678" y="148">One task per token; many tokens</text><text class="s" x="678" y="164">run at once.</text>
+        <rect class="b-disk" x="20" y="204" width="940" height="106" rx="6"/><text class="t" x="34" y="228">Why a key range and not a tablet id</text><text class="s" x="34" y="248">A token built before a tablet split would then still read all the child tablets after it. The token bounds are partition keys, so the scanner re-resolves tablets when it runs.</text><text class="t" x="34" y="276">Splitting inside a tablet</text><text class="s" x="34" y="296">A very large tablet can be cut into several tokens by key range. The server can suggest split points from its index with the SplitKeyRange RPC.</text>
+      </svg>
+      </div>
+      <figcaption>All the engines that integrate with Kudu use this API, which is why a Spark job and an Impala query on the same table follow the same pruning and snapshot rules.</figcaption>
+    </figure>
+  </section>
+
+  <section id="open">
+    <h2>Opening a scanner on the server</h2>
+    <div class="prose">
+      <p>The first RPC for a tablet carries a <code>NewScanRequestPB</code>. The handler turns it into a <code>ScanSpec</code> (the predicates and key bounds), simplifies it, and builds the iterator. Most of the checks run before any file is touched, which makes rejections cheap.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 600" role="img" aria-label="Steps of HandleNewScanRequest from authorization to the first batch: scanner creation, projection decode, validity checks, spec optimization, short circuit, read mode switch, iterator init and registering the scanner.">
+        <defs><marker id="h3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <g>
+          <rect class="b-master" x="20" y="14" width="500" height="50" rx="5"/><text class="t" x="32" y="36">① Authorize</text><text class="s" x="32" y="54">token must allow scan; column-level privileges for each projected column</text>
+          <rect class="b-master" x="20" y="76" width="500" height="50" rx="5"/><text class="t" x="32" y="98">② Find the replica; refuse if the server is shutting down</text><text class="s" x="32" y="116">tablet running? tablet server not quiescing?</text>
+          <rect class="b-master" x="20" y="138" width="500" height="50" rx="5"/><text class="t" x="32" y="160">③ Create and register a scanner</text><text class="s" x="32" y="178">id, owner, 60 s idle timeout; locked for exclusive use while this RPC runs</text>
+          <rect class="b-master" x="20" y="200" width="500" height="50" rx="5"/><text class="t" x="32" y="222">④ Decode and validate</text><text class="s" x="32" y="240">projection without column ids; an ordered scan must be a snapshot read</text>
+          <rect class="b-ts" x="20" y="262" width="500" height="64" rx="5"/><text class="t" x="32" y="284">⑤ Build and optimize the ScanSpec</text><text class="s" x="32" y="304">predicates + key bounds; drop IN-list values outside this partition;</text><text class="s" x="32" y="318">merge and simplify predicates; add predicate columns missing from the projection</text>
+          <rect class="b-ts" x="20" y="338" width="500" height="50" rx="5"/><text class="t" x="32" y="360">⑥ Can the spec match anything? If not, short-circuit</text><text class="s" x="32" y="378">reply "no rows" without creating an iterator at all</text>
+          <rect class="b-client" x="20" y="400" width="500" height="64" rx="5"/><text class="t" x="32" y="422">⑦ Pick the snapshot and create the iterator</text><text class="s" x="32" y="442">depends on the read mode (next section); waits if a snapshot needs it</text><text class="s" x="32" y="456">iterator Init(spec): pushes bounds and predicates down to the files</text>
+          <rect class="b-ts" x="20" y="476" width="500" height="50" rx="5"/><text class="t" x="32" y="498">⑧ Anything left? Keep the scanner, or finish now</text><text class="s" x="32" y="516">if no more rows or the limit is met, the scanner is dropped immediately</text>
+          <rect class="b-ts" x="20" y="538" width="500" height="50" rx="5"/><text class="t" x="32" y="560">⑨ Return the first batch in the same RPC</text><text class="s" x="32" y="578">the open call already runs the continue logic, saving a round trip</text>
+        </g>
+        <path class="ln" marker-end="url(#h3)" d="M270 64 V74"/><path class="ln" marker-end="url(#h3)" d="M270 126 V136"/><path class="ln" marker-end="url(#h3)" d="M270 188 V198"/><path class="ln" marker-end="url(#h3)" d="M270 250 V260"/><path class="ln" marker-end="url(#h3)" d="M270 326 V336"/><path class="ln" marker-end="url(#h3)" d="M270 388 V398"/><path class="ln" marker-end="url(#h3)" d="M270 464 V474"/><path class="ln" marker-end="url(#h3)" d="M270 526 V536"/>
+
+        <text class="t" x="570" y="34">Why step ⑤ matters</text>
+        <rect class="b-disk" x="570" y="46" width="390" height="148" rx="6"/><text class="t" x="584" y="70">Optimization examples</text><text class="m" x="584" y="92">a &gt;= 3 AND a &gt;= 7</text><text class="s" x="584" y="108">→ a &gt;= 7</text><text class="m" x="584" y="130">a = 5 AND a = 6</text><text class="s" x="584" y="146">→ matches nothing → short-circuit (step 6)</text><text class="m" x="584" y="168">host = 'web-3' (first key column)</text><text class="s" x="584" y="184">→ becomes a primary key range on the key columns</text>
+        <text class="t" x="570" y="226">Error codes you may see</text>
+        <text class="s" x="570" y="248">INVALID_SCAN_SPEC: bad order or read mode combination,</text><text class="s" x="570" y="264">or a malformed predicate</text>
+        <text class="s" x="570" y="288">INVALID_SNAPSHOT: a timestamp in the future, or older</text><text class="s" x="570" y="304">than the history retained (Part 6)</text>
+        <text class="s" x="570" y="328">THROTTLED: could not wait long enough for a snapshot</text><text class="s" x="570" y="344">to become consistent; retried by the client</text>
+        <text class="s" x="570" y="368">NOT_AUTHORIZED: missing scan privilege on a column</text>
+        <rect class="b-client" x="570" y="396" width="390" height="130" rx="6"/><text class="t" x="584" y="420">Memory note (Part 7)</text><text class="s" x="584" y="440">The scanner's arena, the row block and the response all</text><text class="s" x="584" y="456">live until the call ends or the scanner is closed. A scan</text><text class="s" x="584" y="472">that stays open and idle holds only the iterator state,</text><text class="s" x="584" y="488">and is freed after 60 s without a request.</text>
+      </svg>
+      </div>
+      <figcaption>The source is <code>TabletServiceImpl::HandleNewScanRequest</code>. Note step ⑨: the open RPC and the first fetch are one round trip whenever the client asks for data at open (the usual case).</figcaption>
+    </figure>
+  </section>
+
+  <section id="snapshot">
+    <h2>Which version of the data? Snapshots</h2>
+    <div class="prose">
+      <p>Step ⑦ is where MVCC (Parts 5 and 6) decides what a scan sees. An <code>MvccSnapshot</code> is a set of timestamps whose changes count as committed. The three read modes pick that set differently, and trade waiting against consistency. The picture uses one tablet where several writes are in flight.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 520" role="img" aria-label="Writes 98 to 103 on one tablet; some are applied, some in flight. READ_LATEST sees the applied ones; READ_AT_SNAPSHOT at now waits for in-flight ops below its timestamp; READ_YOUR_WRITES picks a timestamp near the clean time and waits little.">
+        <defs><marker id="h4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">ONE TABLET'S WRITES BY TIMESTAMP (each cell is one write batch)</text>
+        <g>
+          <rect class="b-ts" x="40" y="34" width="90" height="40" rx="3"/><text class="t c" x="85" y="58">98</text>
+          <rect class="b-ts" x="136" y="34" width="90" height="40" rx="3"/><text class="t c" x="181" y="58">99</text>
+          <rect class="b-ts" x="232" y="34" width="90" height="40" rx="3"/><text class="t c" x="277" y="58">100</text>
+          <rect class="b-raft" x="328" y="34" width="90" height="40" rx="3"/><text class="t c" x="373" y="58">101</text>
+          <rect class="b-ts" x="424" y="34" width="90" height="40" rx="3"/><text class="t c" x="469" y="58">102</text>
+          <rect class="b-raft" x="520" y="34" width="90" height="40" rx="3"/><text class="t c" x="565" y="58">103</text>
+          <rect class="box" x="616" y="34" width="110" height="40" rx="3" style="stroke-dasharray:4 3"/><text class="s c" x="671" y="58">now = 104</text>
+        </g>
+        <text class="s" x="40" y="94">applied (visible)</text><rect class="b-ts" x="150" y="84" width="14" height="14" rx="2"/><text class="s" x="180" y="94">in flight (replicating or applying)</text><rect class="b-raft" x="360" y="84" width="14" height="14" rx="2"/>
+        <path class="ln-r" d="M326 100 V 124" /><text class="s" x="334" y="118" fill="var(--raft)">clean time = 100: everything up to here is applied</text>
+
+        <rect class="b-master" x="20" y="146" width="300" height="190" rx="6"/><text class="t" x="34" y="170">READ_LATEST (default)</text><text class="s" x="34" y="192">Sees whatever is applied at this</text><text class="s" x="34" y="208">instant: 98, 99, 100, 102.</text><text class="s" x="34" y="232">Does not wait for anything.</text><text class="s" x="34" y="256">Not repeatable: a second scan a</text><text class="s" x="34" y="272">moment later sees 101 and 103 too.</text><text class="s" x="34" y="296">"Read committed". It returns no</text><text class="s" x="34" y="312">snapshot timestamp to reuse.</text>
+        <rect class="b-client" x="340" y="146" width="300" height="190" rx="6"/><text class="t" x="354" y="170">READ_AT_SNAPSHOT</text><text class="s" x="354" y="192">Timestamp = the one given, or now</text><text class="s" x="354" y="208">(104). The server must make sure:</text><text class="s" x="354" y="232">1. its safe time has reached 104,</text><text class="s" x="354" y="248">2. every op below 104 is applied:</text><text class="s" x="354" y="264">it waits for 101 and 103.</text><text class="s" x="354" y="288">Then sees 98 to 103. Repeatable:</text><text class="s" x="354" y="304">the same timestamp gives the same</text><text class="s" x="354" y="320">rows. Waits at most about 1 s.</text>
+        <rect class="b-ts" x="660" y="146" width="300" height="190" rx="6"/><text class="t" x="674" y="170">READ_YOUR_WRITES</text><text class="s" x="674" y="192">Timestamp = the larger of the client's</text><text class="s" x="674" y="208">last observed time + 1 and the clean</text><text class="s" x="674" y="224">time. If the client last saw 99: ts 100,</text><text class="s" x="674" y="240">nothing to wait for.</text><text class="s" x="674" y="264">If it wrote 102: ts 103, so it waits</text><text class="s" x="674" y="280">only for ops up to 103.</text><text class="s" x="674" y="304">Guarantees the client sees its own</text><text class="s" x="674" y="320">writes, with the least waiting.</text>
+
+        <rect class="b-disk" x="20" y="356" width="940" height="150" rx="6"/><text class="t" x="34" y="380">What else the snapshot choice affects</text>
+        <text class="s" x="34" y="402">· The timestamp in the response (snap_timestamp) is stored by the client and used for the remaining tablets, so a multi-tablet snapshot scan reads one point in time.</text>
+        <text class="s" x="34" y="422">· A timestamp in the future is rejected. A timestamp older than the history retention (Part 6) is rejected, because its UNDO records may be gone.</text>
+        <text class="s" x="34" y="442">· A follower can serve a snapshot read once its own safe time passes the snapshot, which is why CLOSEST_REPLICA requires a snapshot mode.</text>
+        <text class="s" x="34" y="462">· A long wait is capped at 1 s (scanner_max_wait_ms); past it the server answers THROTTLED and the client retries. snapshot_read_inflight_wait_duration shows the cost.</text>
+        <text class="s" x="34" y="486">· Incremental backups and diff scans use two snapshots, a start and an end, and read the UNDO and REDO changes between them.</text>
+      </svg>
+      </div>
+      <figcaption>Writes at Kudu's default (<code>CLIENT_PROPAGATED</code> consistency) return their timestamp to the client, and the client sends it on its next read. That is how READ_YOUR_WRITES knows what "my writes" means without any server-side session.</figcaption>
+    </figure>
+  </section>
+
+  <section id="tree">
+    <h2>The iterator tree</h2>
+    <div class="prose">
+      <p>The server reads rows through <code>RowwiseIterator</code> objects that hand over one block at a time. The shape of the tree comes from the tablet's components (Part 6): one MemRowSet iterator, one iterator per candidate DiskRowSet, and one combining iterator on top.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 560" role="img" aria-label="Iterator tree: Tablet iterator over a Union or Merge iterator; children are a MemRowSet iterator and, per DiskRowSet, a Materializing iterator over a DeltaApplier over a CFileSet iterator with column iterators and a merged delta iterator of UNDO files, REDO files and the DeltaMemStore.">
+        <defs><marker id="h5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-master" x="330" y="14" width="320" height="46" rx="5"/><text class="t c" x="490" y="34">Tablet::Iterator</text><text class="s c" x="490" y="50">holds the snapshot and projection</text>
+        <rect class="b-client" x="250" y="82" width="480" height="62" rx="5"/><text class="t c" x="490" y="102">UnionIterator  or  MergeIterator</text><text class="s c" x="490" y="120">unordered: children one after another, no key compared</text><text class="s c" x="490" y="136">ordered: merge children by primary key</text>
+        <path class="ln" marker-end="url(#h5)" d="M490 60 V 80"/>
+        <path class="ln" marker-end="url(#h5)" d="M400 144 C 400 170, 170 170, 170 190"/><path class="ln" marker-end="url(#h5)" d="M580 144 C 580 170, 640 170, 640 190"/>
+        <rect class="b-ts" x="20" y="192" width="300" height="86" rx="5"/><text class="t" x="34" y="214">MemRowSet iterator</text><text class="s" x="34" y="234">walks the B-tree in key order</text><text class="s" x="34" y="250">applies each row's mutation list for the snapshot</text><text class="s" x="34" y="266">(and transaction MemRowSets, if any)</text>
+        <rect class="grp" x="350" y="188" width="610" height="352" rx="8"/><text class="t" x="366" y="210">One iterator per candidate DiskRowSet (R2, R4, R5 ...)</text>
+        <rect class="b-ts" x="366" y="222" width="578" height="44" rx="4"/><text class="t" x="378" y="242">MaterializingIterator</text><text class="s" x="378" y="258">evaluates predicates, decides which columns to read (see next section)</text>
+        <rect class="b-client" x="366" y="278" width="578" height="52" rx="4"/><text class="t" x="378" y="298">DeltaApplier</text><text class="s" x="378" y="316">applies deltas to each column batch, and clears the selection bit of rows that are deleted at the snapshot</text>
+        <rect class="b-disk" x="366" y="342" width="280" height="140" rx="4"/><text class="t" x="378" y="362">CFileSet::Iterator (base data)</text><text class="s" x="378" y="382">one ColumnIterator per projected</text><text class="s" x="378" y="398">column, plus the key column when</text><text class="s" x="378" y="414">key bounds exist. Pushes bounds into</text><text class="s" x="378" y="430">a row range [lower, upper) with a</text><text class="s" x="378" y="446">seek in the key index.</text><text class="s" x="378" y="470">blocks come from the block cache</text>
+        <rect class="b-raft" x="660" y="342" width="284" height="140" rx="4"/><text class="t" x="672" y="362">Delta iterator (merged)</text><text class="s" x="672" y="382">UNDO delta files: roll back</text><text class="s" x="672" y="398">changes newer than the snapshot</text><text class="s" x="672" y="418">REDO delta files and the</text><text class="s" x="672" y="434">DeltaMemStore: roll forward</text><text class="s" x="672" y="450">changes up to the snapshot</text><text class="s" x="672" y="472">cache_blocks follows the scan</text>
+        <path class="ln" marker-end="url(#h5)" d="M655 266 V 276"/><path class="ln" marker-end="url(#h5)" d="M506 330 V 340" /><path class="ln" marker-end="url(#h5)" d="M802 330 V 340"/>
+        <rect class="b-client" x="20" y="300" width="300" height="240" rx="6"/><text class="t" x="34" y="324">Which DiskRowSets are in the tree</text><text class="s" x="34" y="346">If the scan has a primary key lower or</text><text class="s" x="34" y="362">upper bound, only the rowsets whose</text><text class="s" x="34" y="378">key range overlaps it (found with the</text><text class="s" x="34" y="394">rowset interval tree of Part 6).</text><text class="s" x="34" y="418">Without bounds, every rowset.</text><text class="s" x="34" y="448">The metric rowsets_per_scan records</text><text class="s" x="34" y="464">how many were used. High values mean</text><text class="s" x="34" y="480">compaction is behind, or the scan has</text><text class="s" x="34" y="496">no bounds that could exclude rowsets.</text>
+      </svg>
+      </div>
+      <figcaption>An unordered scan can read rowsets in any order, even in parallel, and does not need to read key columns that are not projected. An ordered scan must also read the key columns and compare keys across children, which is why ordering costs more and why Kudu only offers it for snapshot reads.</figcaption>
+    </figure>
+  </section>
+
+  <section id="batch">
+    <h2>Reading one batch from a DiskRowSet</h2>
+    <div class="prose">
+      <p>Inside a rowset the iterator works on blocks of up to 128 rows, numbered by their row number. For each block it builds a <strong>selection vector</strong>, one bit per row, and clears bits as filters reject rows. Columns that have a predicate are read first. If the predicate rejects the whole block, the other projected columns are never read, so their blocks stay on disk.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 560" role="img" aria-label="Steps for one block: set the selection vector, apply deltas which clear deleted rows, evaluate predicate columns in turn stopping early if nothing is selected, then read the remaining projected columns and return the block with the selection vector.">
+        <defs><marker id="h6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">EXAMPLE: SELECT time FROM metrics WHERE host = 'web-3' AND cpu &gt; 0.4 (one rowset, one block of 128 rows)</text>
+        <g>
+          <rect class="b-disk" x="20" y="36" width="440" height="56" rx="5"/><text class="t" x="32" y="58">① Row range from the key bounds</text><text class="s" x="32" y="78">host = 'web-3' became a key range; seek in the index: rows 3,000 to 3,540 only</text>
+          <rect class="b-disk" x="20" y="104" width="440" height="56" rx="5"/><text class="t" x="32" y="126">② New block: selection vector = all 128 rows selected</text><text class="s" x="32" y="146">row numbers 3,000 to 3,127</text>
+          <rect class="b-raft" x="20" y="172" width="440" height="68" rx="5"/><text class="t" x="32" y="194">③ Deleted rows</text><text class="s" x="32" y="214">UNDO and REDO say rows 3,010 and 3,044 are deleted at the snapshot:</text><text class="s" x="32" y="230">clear their bits. 126 rows selected</text>
+          <rect class="b-ts" x="20" y="252" width="440" height="68" rx="5"/><text class="t" x="32" y="274">④ Predicate column first: cpu &gt; 0.4</text><text class="s" x="32" y="294">read the cpu block, apply REDO changes to it, test each selected row:</text><text class="s" x="32" y="310">9 rows pass</text>
+          <rect class="b-ts" x="20" y="332" width="440" height="56" rx="5"/><text class="t" x="32" y="354">⑤ Anything selected? If no, stop here for this block</text><text class="s" x="32" y="374">the time column's block is not read; its IO is saved</text>
+          <rect class="b-ts" x="20" y="400" width="440" height="56" rx="5"/><text class="t" x="32" y="422">⑥ Read the other projected columns: time</text><text class="s" x="32" y="442">with deltas applied; only selected rows are used</text>
+          <rect class="b-client" x="20" y="468" width="440" height="56" rx="5"/><text class="t" x="32" y="490">⑦ Hand the block and selection vector up</text><text class="s" x="32" y="510">the collector copies the 9 selected rows into the response</text>
+        </g>
+        <path class="ln" marker-end="url(#h6)" d="M240 92 V102"/><path class="ln" marker-end="url(#h6)" d="M240 160 V170"/><path class="ln" marker-end="url(#h6)" d="M240 240 V250"/><path class="ln" marker-end="url(#h6)" d="M240 320 V330"/><path class="ln" marker-end="url(#h6)" d="M240 388 V398"/><path class="ln" marker-end="url(#h6)" d="M240 456 V466"/>
+
+        <text class="t" x="520" y="52">Three ideas at work</text>
+        <rect class="b-master" x="520" y="64" width="440" height="116" rx="6"/><text class="t" x="534" y="88">Late materialization</text><text class="s" x="534" y="108">Cheap, selective filters decide whether to read the expensive</text><text class="s" x="534" y="124">columns. A scan with a good filter touches only a fraction of</text><text class="s" x="534" y="140">the bytes of its projection. Row numbers make this possible:</text><text class="s" x="534" y="156">every column file is addressed the same way.</text>
+        <rect class="b-master" x="520" y="192" width="440" height="116" rx="6"/><text class="t" x="534" y="216">Evaluation on encoded data</text><text class="s" x="534" y="236">Some predicates run on the encoded block without decoding</text><text class="s" x="534" y="252">it. For a dictionary-encoded string column, host = 'web-3'</text><text class="s" x="534" y="268">becomes a comparison of small integer codes. If the value is</text><text class="s" x="534" y="284">not in the dictionary, the block cannot match at all.</text>
+        <rect class="b-master" x="520" y="320" width="440" height="116" rx="6"/><text class="t" x="534" y="344">Bloom filter predicates can switch off</text><text class="s" x="534" y="364">The iterator measures how many rows a bloom filter predicate</text><text class="s" x="534" y="380">rejects. If it rejects almost nothing, the server stops</text><text class="s" x="534" y="396">evaluating it for later blocks, since it is only a hint and the</text><text class="s" x="534" y="412">engine checks its real condition. Counted in scanner_predicates_disabled.</text>
+        <rect class="b-disk" x="520" y="448" width="440" height="76" rx="6"/><text class="t" x="534" y="472">What the stats report</text><text class="s" x="534" y="492">cells and bytes read from disk or cache, blocks read, rows</text><text class="s" x="534" y="508">scanned versus rows returned. A large gap means weak filters.</text>
+      </svg>
+      </div>
+      <figcaption>The row block size of 128 is deliberate: a power of two makes the selection-vector bit operations fast. The batch that goes back to the client is made of many of these blocks (next section).</figcaption>
+    </figure>
+  </section>
+
+  <section id="funnel">
+    <h2>Every filter in one picture</h2>
+    <div class="prose">
+      <p>Each stage removes work earlier and more cheaply than the next. When a scan is slow, the useful question is at which stage the data stopped being pruned. The numbers below are an illustration.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 450" role="img" aria-label="Funnel of pruning stages with example numbers: tablets, then rowsets, then rows by key range, then rows after predicates and deletes, then returned rows.">
+        <defs><marker id="h7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">EXAMPLE: A TABLE OF 600 TABLETS AND 3 BILLION ROWS, SCANNED WITH host = 'web-3' AND cpu &gt; 0.4 AND time IN LAST HOUR</text>
+        <g>
+          <rect class="b-client" x="20" y="36" width="940" height="46" rx="4"/><text class="t" x="32" y="56">① Partition pruning (client): 600 tablets → 2</text><text class="s" x="32" y="72">hash on host picks a bucket; time range picks the current range. 598 tablets never see an RPC.</text>
+          <rect class="b-client" x="60" y="92" width="860" height="46" rx="4"/><text class="t" x="72" y="112">② Rowset interval tree (server): 140 rowsets per tablet → 6</text><text class="s" x="72" y="128">the scan's key range overlaps only a few rowsets' min and max keys. The other files are not opened.</text>
+          <rect class="b-master" x="100" y="148" width="780" height="46" rx="4"/><text class="t" x="112" y="168">③ Key range inside a rowset: 5,000,000 rows → 40,000</text><text class="s" x="112" y="184">the index seek turns the bounds into a row number range; rows outside it are never visited.</text>
+          <rect class="b-master" x="140" y="204" width="700" height="46" rx="4"/><text class="t" x="152" y="224">④ Deletes and predicate columns: 40,000 rows → 2,100</text><text class="s" x="152" y="240">deleted rows removed; cpu &gt; 0.4 evaluated first; whole blocks that fail never read their other columns.</text>
+          <rect class="b-ts" x="180" y="260" width="620" height="46" rx="4"/><text class="t" x="192" y="280">⑤ Projection: only the time column is read for the survivors</text><text class="s" x="192" y="296">one column file, 2,100 values, from a few blocks.</text>
+          <rect class="b-ts" x="220" y="316" width="540" height="46" rx="4"/><text class="t" x="232" y="336">⑥ Returned: 2,100 rows in one batch (limit 1 MiB per batch)</text><text class="s" x="232" y="352">sidecar buffers, not row-by-row protobufs.</text>
+        </g>
+        <rect class="b-disk" x="20" y="378" width="940" height="60" rx="6"/><text class="s" x="34" y="400">Reading the stats: if rows scanned is far above rows returned, stages ③ or ④ are weak (no key prefix in the filter, or a non-selective predicate). If rowsets per scan is high,</text><text class="s" x="34" y="418">② is weak: compaction (Part 6) is behind. If partitions contacted equals partitions in the table, ① is weak: the filter does not mention the partition columns.</text>
+      </svg>
+      </div>
+      <figcaption>Primary key design is the most powerful lever, since it feeds stages ①, ② and ③ at once. A filter on a key prefix prunes tablets, rowsets and rows. A filter on a non-key column can only help from stage ④ on.</figcaption>
+    </figure>
+  </section>
+
+  <section id="loop">
+    <h2>Batches, keep-alive and the scanner's lifetime</h2>
+    <div class="prose">
+      <p>After the open call, the client keeps asking for more. Each request names the scanner and carries a call sequence number, so a duplicate or reordered request cannot return rows twice.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 560" role="img" aria-label="Sequence between client and tablet server: open with first batch, continue requests with increasing call sequence ids, keep-alive during pauses, the server loop until the batch is big enough or 500 ms pass, close or exhaustion, then the next tablet.">
+        <defs><marker id="h8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-client" x="60" y="8" width="200" height="36" rx="6"/><text class="t c" x="160" y="31">Client scanner</text>
+        <rect class="b-ts" x="560" y="8" width="240" height="36" rx="6"/><text class="t c" x="680" y="31">Tablet server (tablet T)</text>
+        <path class="life" d="M160 44 V550 M680 44 V550"/>
+        <path class="ln" marker-end="url(#h8)" d="M160 84 H 678"/><text class="s h" x="170" y="76">① Scan(new_scan_request: spec, mode, batch hint)</text>
+        <rect class="b-ts" x="520" y="96" width="320" height="52" rx="5"/><text class="s" x="530" y="116">open: build the iterator and fill the first batch</text><text class="s" x="530" y="132">scanner_id returned if rows remain</text>
+        <path class="ln-d" marker-end="url(#h8)" d="M680 170 H 162"/><text class="s h" x="190" y="162">rows (sidecars) · scanner_id · snap_timestamp · propagated_timestamp</text>
+        <text class="s" x="40" y="204">the application processes the batch</text>
+        <path class="ln" marker-end="url(#h8)" d="M160 234 H 678"/><text class="s h" x="170" y="226">② Scan(scanner_id, call_seq_id = 1)</text>
+        <rect class="b-master" x="520" y="246" width="320" height="86" rx="5"/><text class="s" x="530" y="266">loop: NextBlock (128 rows) and copy selected rows</text><text class="s" x="530" y="282">until the response reaches the batch size (1 MiB</text><text class="s" x="530" y="298">by default, at most 8 MiB), or 500 ms have passed,</text><text class="s" x="530" y="314">or the iterator is exhausted or the limit is met</text>
+        <path class="ln-d" marker-end="url(#h8)" d="M680 354 H 162"/><text class="s h" x="190" y="346">rows · has_more_results = true</text>
+        <text class="s" x="40" y="384">application is slow: a long pause</text>
+        <path class="ln" marker-end="url(#h8)" d="M160 410 H 678"/><text class="s h" x="170" y="402">③ ScannerKeepAlive(scanner_id), sent periodically</text>
+        <path class="ln-d" marker-end="url(#h8)" d="M680 432 H 162"/>
+        <path class="ln" marker-end="url(#h8)" d="M160 468 H 678"/><text class="s h" x="170" y="460">④ Scan(scanner_id, call_seq_id = 2)  … repeated</text>
+        <path class="ln-d" marker-end="url(#h8)" d="M680 492 H 162"/><text class="s h" x="190" y="484">last batch · has_more_results = false: scanner removed</text>
+        <text class="s" x="170" y="530">The client then removes this tablet's range from the pruner, finds the next tablet and starts over.</text>
+      </svg>
+      </div>
+      <figcaption>Three details to remember. A call sequence mismatch gives <code>INVALID_SCAN_CALL_SEQ_ID</code>. A scanner idle for longer than <code>--scanner_ttl_ms</code> (60 s) is dropped and the next continue says "not found". And the 500 ms budget stops one slow scan from holding a service thread for long, because the scan thread is borrowed from the service pool of Part 2.</figcaption>
+    </figure>
+  </section>
+
+  <section id="ft">
+    <h2>When a server fails mid-scan</h2>
+    <div class="prose">
+      <p>Scanner state lives only in the memory of one tablet server. If that server stops, or the scanner times out, the scan cannot simply continue. Kudu offers two behaviors.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 340" role="img" aria-label="Without fault tolerance, a failed tablet server ends the scan with an error. With fault tolerance, the client re-opens the scan on another replica as an ordered snapshot read, starting after the last primary key it received.">
+        <defs><marker id="h9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-raft" x="20" y="20" width="450" height="190" rx="6"/><text class="t" x="34" y="44">Default scan</text>
+        <text class="s" x="34" y="68">Replica R1 serves batches 1 and 2.</text><text class="s" x="34" y="88">R1 crashes before batch 3.</text><text class="s" x="34" y="112">The scanner is gone. There is no way to</text><text class="s" x="34" y="128">tell where in the tablet it was.</text><text class="s" x="34" y="152" fill="var(--raft)">The scan fails with an error and the</text><text class="s" x="34" y="168" fill="var(--raft)">application decides: usually retry the task.</text><text class="s" x="34" y="192">Highest throughput: no ordering, no snapshot.</text>
+        <rect class="b-ts" x="510" y="20" width="450" height="190" rx="6"/><text class="t" x="524" y="44">Fault-tolerant scan (SetFaultTolerant)</text>
+        <text class="s" x="524" y="68">Runs as an ordered READ_AT_SNAPSHOT scan, so:</text><text class="s" x="524" y="88">· the snapshot timestamp is fixed after the first batch</text><text class="s" x="524" y="104">· rows arrive in primary key order</text><text class="s" x="524" y="128">Each response carries the last primary key returned.</text><text class="s" x="524" y="148">After a failure the client opens a new scanner on another</text><text class="s" x="524" y="164">replica with the same timestamp and last_primary_key as a</text><text class="s" x="524" y="180">lower bound, and carries on with no repeats or gaps.</text>
+        <rect class="b-disk" x="20" y="230" width="940" height="92" rx="6"/><text class="t" x="34" y="254">The price of fault tolerance</text><text class="s" x="34" y="274">Ordered scans need a merge across rowsets, key columns must be read, and a snapshot read may wait for in-flight writes. It typically has lower throughput than a default scan.</text><text class="s" x="34" y="294">Many engines run default scans and rerun a failed task instead, because tasks are short and a restart is cheaper than slowing every scan.</text><text class="s" x="34" y="312">A keep-alive keeps an otherwise idle scanner from timing out; it does not protect against a server crash.</text>
+      </svg>
+      </div>
+      <figcaption>The resume logic is in <code>client/scanner-internal.cc</code>: it records <code>last_primary_key_</code> from each response and sets it on the next <code>NewScanRequestPB</code>. The snapshot timestamp is stored the same way, so the new replica reads exactly the same version.</figcaption>
+    </figure>
+  </section>
+
+  <section id="slow">
+    <h2>Why a scan is slow, and where to look</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Symptom</th><th>Where to look</th><th>Usual cause and fix</th></tr></thead>
+        <tbody>
+          <tr><td>Contacts all tablets of a table</td><td>tablets contacted vs tablets in the table; the query plan</td><td>the filter does not constrain the partition columns; design partitions around common filters, or add a range bound on the partition key</td></tr>
+          <tr><td><code>scanner_rows_scanned</code> far above <code>scanner_rows_returned</code></td><td>tablet metrics, <code>/scans</code> page</td><td>weak or non-key filters; filter on a key prefix, or reorder the primary key so that it leads with the common filter</td></tr>
+          <tr><td>High <code>rowsets_per_scan</code></td><td>tablet page, <code>/maintenance-manager</code></td><td>compaction behind or a key pattern that overlaps; add maintenance threads (Part 6)</td></tr>
+          <tr><td>Many block reads, cold cache</td><td><code>scanner_bytes_scanned_from_disk</code>, <code>block_cache_hits</code></td><td>working set larger than the 512 MB cache, or a project of too many columns; trim the projection or grow the cache within the 30% rule (Part 7)</td></tr>
+          <tr><td>Snapshot scans have extra latency</td><td><code>snapshot_read_inflight_wait_duration</code></td><td>waiting on in-flight writes; use READ_YOUR_WRITES or READ_LATEST where consistency allows</td></tr>
+          <tr><td>Ordered scan is slow</td><td>iterator tree: merge over many rowsets</td><td>an ordered scan merges all overlapping rowsets; use unordered, or sort downstream</td></tr>
+          <tr><td>Scan errors after pauses</td><td>"Scanner not found", call sequence errors</td><td>scanner idle past 60 s; process batches faster, or call KeepAlive while the application pauses</td></tr>
+          <tr><td>Throughput limited by round trips</td><td>number of batches, batch bytes</td><td>raise the batch size (up to 8 MiB); more tokens in parallel</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Server flag</th><th>Default</th><th>Controls</th></tr></thead>
+        <tbody>
+          <tr><td><code>--scanner_default_batch_size_bytes</code></td><td>1 MiB</td><td>batch size when the client does not ask for one</td></tr>
+          <tr><td><code>--scanner_max_batch_size_bytes</code></td><td>8 MiB</td><td>largest batch a client may request</td></tr>
+          <tr><td><code>--scanner_batch_size_rows</code></td><td>128</td><td>rows per internal row block</td></tr>
+          <tr><td><code>--scanner_ttl_ms</code></td><td>60000</td><td>idle time before a scanner is removed</td></tr>
+          <tr><td><code>--scanner_max_wait_ms</code></td><td>1000</td><td>longest wait for a snapshot to become consistent</td></tr>
+          <tr><td><code>--slow_scanner_threshold_ms</code></td><td>60000</td><td>scans slower than this are reported as slow</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="src">
+    <h2>Where to find it in the source</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Topic</th><th>Look at (in <code>src/kudu/</code>)</th></tr></thead>
+        <tbody>
+          <tr><td>Client scanner and tablet walk</td><td><code>client/scanner-internal.cc</code>, <code>client/scan_configuration.cc</code></td></tr>
+          <tr><td>Scan tokens</td><td><code>client/scan_token-internal.cc</code>; design: <code>docs/design-docs/scan-tokens.md</code></td></tr>
+          <tr><td>Partition pruning</td><td><code>common/partition_pruner.cc</code>; design: <code>scan-optimization-partition-pruning.md</code></td></tr>
+          <tr><td>Scan RPC handlers</td><td><code>tserver/tablet_service.cc</code>: <code>Scan</code>, <code>HandleNewScanRequest</code>, <code>HandleContinueScanRequest</code>, <code>HandleScanAtSnapshot</code></td></tr>
+          <tr><td>Scanner registry</td><td><code>tserver/scanners.cc</code></td></tr>
+          <tr><td>Predicates and spec</td><td><code>common/column_predicate.cc</code>, <code>common/scan_spec.cc</code></td></tr>
+          <tr><td>Iterator tree</td><td><code>tablet/tablet.cc</code> (<code>CaptureConsistentIterators</code>), <code>common/generic_iterators.cc</code> (Union, Merge, Materializing)</td></tr>
+          <tr><td>Reading base data and deltas</td><td><code>tablet/cfile_set.cc</code>, <code>tablet/delta_applier.cc</code>, <code>tablet/delta_tracker.cc</code></td></tr>
+          <tr><td>Snapshots</td><td><code>tablet/mvcc.cc</code>, <code>consensus/time_manager.cc</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p><strong>You now have the whole read and write path.</strong> Writes: Parts 1, 2, 4 and 5. Storage: Parts 6 and 7. Reads: this part. Natural next topics are multi-tablet transactions, security (authentication and authorization), and the integrations with Spark and Impala.</p>
+    </div>
+  </section>
+</main>
