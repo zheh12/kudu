@@ -1,0 +1,362 @@
+<title>Kudu Tablet Copy and Rebalancing Tutorial</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column; wide figures scroll inside their own frame on phones.
+   Palette is keyed to the roles in the system: client (ochre), master (indigo), tablet server (teal), Raft/WAL (rust), disk (slate). */
+:root {
+  --bg: #f4f7f8; --surf: #ffffff; --fg: #14212b; --muted: #55646e; --line: #d0d9df; --line2: #8fa0ab;
+  --client: #a9680f; --client-t: #fbeed6;
+  --master: #4a4db8; --master-t: #e6e7fa;
+  --ts: #0d7566; --ts-t: #d9f1ed;
+  --raft: #bb4a22; --raft-t: #fae3d9;
+  --disk: #52646f; --disk-t: #e6ecef;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+    --client: #e3ad50; --client-t: #3a2f17;
+    --master: #a1a3f5; --master-t: #25284d;
+    --ts: #4fc9b4; --ts-t: #11322d;
+    --raft: #f2905f; --raft-t: #3d2218;
+    --disk: #a3b4bf; --disk-t: #22323c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+  --client: #e3ad50; --client-t: #3a2f17;
+  --master: #a1a3f5; --master-t: #25284d;
+  --ts: #4fc9b4; --ts-t: #11322d;
+  --raft: #f2905f; --raft-t: #3d2218;
+  --disk: #a3b4bf; --disk-t: #22323c;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.65 var(--body);
+  padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.prose { max-width: 68ch; display: flex; flex-direction: column; gap: 12px; }
+p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.1rem; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+code { font: 500 .88em var(--mono); background: var(--disk-t); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--master); }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { background: var(--surf); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { font-size: .92rem; color: var(--muted); max-width: 78ch; }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.role { background: var(--surf); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role h3 { color: var(--c); }
+.role p, .role li { font-size: .95rem; }
+.role ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; max-width: 76ch; }
+.note { border-left: 3px solid var(--raft); padding: 4px 0 4px 14px; color: var(--muted); max-width: 68ch; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font: 500 13px var(--mono); text-decoration: none; color: var(--fg); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+/* SVG vocabulary */
+svg text { font-family: var(--body); fill: var(--fg); font-size: 13px; }
+svg .t { font-weight: 600; }
+svg .s { font-size: 11.5px; fill: var(--muted); }
+svg .m { font-family: var(--mono); font-size: 11.5px; }
+svg .h { paint-order: stroke; stroke: var(--surf); stroke-width: 5px; stroke-linejoin: round; }
+svg .c { text-anchor: middle; }
+svg .e { text-anchor: end; }
+svg .box { fill: var(--surf); stroke: var(--line2); stroke-width: 1.4; }
+svg .grp { fill: none; stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .b-client { fill: var(--client-t); stroke: var(--client); stroke-width: 1.5; }
+svg .b-master { fill: var(--master-t); stroke: var(--master); stroke-width: 1.5; }
+svg .b-ts { fill: var(--ts-t); stroke: var(--ts); stroke-width: 1.5; }
+svg .b-raft { fill: var(--raft-t); stroke: var(--raft); stroke-width: 1.5; }
+svg .b-disk { fill: var(--disk-t); stroke: var(--disk); stroke-width: 1.5; }
+svg .solid-ts { fill: var(--ts); stroke: var(--ts); }
+svg .solid-ts + text, svg text.on { fill: var(--surf); }
+svg .ln { fill: none; stroke: currentColor; stroke-width: 1.5; }
+svg .ln-r { fill: none; stroke: var(--raft); stroke-width: 1.6; stroke-dasharray: 6 4; }
+svg .ln-d { fill: none; stroke: var(--line2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+svg .life { stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 3 5; }
+</style>
+<main>
+  <header class="prose">
+    <span class="eyebrow">Learning Kudu · Part 11</span>
+    <h1>Tablet copy and rebalancing</h1>
+    <p class="lede">Raft keeps replicas in step by replaying a log, but a brand-new replica has no history and an old log is eventually deleted. <strong>Tablet copy</strong> solves both: it ships a consistent snapshot of a tablet's files from one server to another. <strong>Rebalancing</strong> is the policy layer that decides <em>which</em> replicas to move so servers carry an even load. This part follows a copy from the trigger to the last byte, then shows how a replica move and the rebalancer tool are built on it.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#why">Why copy</a><a href="#protocol">The protocol</a><a href="#inside">Source and target</a><a href="#move">Moving a replica</a><a href="#algo">The algorithm</a><a href="#tool">Running it</a><a href="#flags">Flags</a><a href="#src">Source map</a>
+    </nav>
+  </header>
+
+  <section id="why">
+    <h2>Three situations that need a copy</h2>
+    <div class="prose">
+      <p>The WAL (part 4) lets a follower that is a little behind catch up by replaying ops. It cannot help when the follower has <em>no data at all</em>, or needs ops the leader has already thrown away. In both cases the leader tells that follower to fetch a snapshot instead.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 250" role="img" aria-label="Three cards: a new replica with no tablet, a follower too far behind, and an operator request.">
+        <defs><marker id="u1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-ts" x="20" y="20" width="290" height="150" rx="8"/><text class="t" x="36" y="48">1. A new replica</text>
+        <text class="s" x="36" y="72">Re-replication after a failure, a table's</text><text class="s" x="36" y="88">replicas added, or a rebalancer move.</text>
+        <text class="s" x="36" y="112">The leader sends it a normal Raft update;</text><text class="s" x="36" y="128">the server answers TABLET_NOT_FOUND;</text><text class="s" x="36" y="144">the leader then asks it to copy.</text>
+        <rect class="b-raft" x="345" y="20" width="290" height="150" rx="8"/><text class="t" x="361" y="48">2. A follower that fell behind</text>
+        <text class="s" x="361" y="72">Its log is no longer available on the leader</text><text class="s" x="361" y="88">(the leader keeps at most</text>
+        <text class="m" x="361" y="108">--log_max_segments_to_retain=80</text><text class="s" x="361" y="124">segments for catch-up). Such a follower</text><text class="s" x="361" y="140">is evicted and replaced by a new copy.</text>
+        <rect class="b-master" x="670" y="20" width="290" height="150" rx="8"/><text class="t" x="686" y="48">3. An operator asks</text>
+        <text class="m" x="686" y="76">kudu remote_replica copy</text><text class="s" x="686" y="98">copies a tablet to a named server by hand,</text><text class="s" x="686" y="114">for example to repair a lost replica.</text>
+        <text class="s" x="686" y="138">It talks to the target server directly.</text>
+        <rect class="grp" x="20" y="186" width="940" height="50" rx="6"/>
+        <text class="s" x="36" y="208">In all cases the target server runs the same client code (TabletCopyClient) against the same service on the source (TabletCopyService).</text>
+        <text class="s" x="36" y="226">The leader only <tspan class="t">starts</tspan> the copy; the target does the work, pulling data from the leader.</text>
+      </svg>
+      </div>
+      <figcaption>In the source, the new-replica trigger is the <code>TABLET_NOT_FOUND</code> exchange status in <code>consensus/consensus_queue.cc</code>; the leader builds a <code>StartTabletCopyRequestPB</code> (tablet, source peer and address, current term) in <code>GetTabletCopyRequestForPeer</code>. Copy can be switched off only through the unsafe <code>--enable_tablet_copy</code> test flag.</figcaption>
+    </figure>
+  </section>
+
+  <section id="protocol">
+    <h2>The protocol, step by step</h2>
+    <div class="prose">
+      <p>The target is the active party. After the leader's <code>StartTabletCopy</code> it opens a session with the source, pulls every file, then swaps in the new tablet atomically. The source is only a file server for a frozen view of the tablet. Here the example is a new replica added through a configuration change.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 560" role="img" aria-label="Sequence diagram of a tablet copy among master or tool, leader with source session, and target tablet server.">
+        <defs><marker id="u2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-master" x="40" y="14" width="160" height="40" rx="6"/><text class="t c" x="120" y="39">Master / tool</text>
+        <rect class="b-raft" x="330" y="14" width="220" height="40" rx="6"/><text class="t c" x="440" y="39">Leader (copy source)</text>
+        <rect class="b-ts" x="700" y="14" width="240" height="40" rx="6"/><text class="t c" x="820" y="39">New tablet server (target)</text>
+        <path class="life" d="M120 54 V 545"/><path class="life" d="M440 54 V 545"/><path class="life" d="M820 54 V 545"/>
+
+        <path class="ln" marker-end="url(#u2)" d="M120 84 H 438"/><text class="s h" x="150" y="78">① ChangeConfig: ADD_PEER as NON_VOTER (promote)</text>
+        <path class="ln" marker-end="url(#u2)" d="M440 118 H 818"/><text class="s h" x="480" y="112">② UpdateConsensus (heartbeat)</text>
+        <path class="ln-d" marker-end="url(#u2)" d="M820 140 H 442"/><text class="s h" x="520" y="134">TABLET_NOT_FOUND</text>
+        <path class="ln-r" marker-end="url(#u2)" d="M440 172 H 818"/><text class="s h" x="480" y="166">③ StartTabletCopy(tablet, source, term)</text>
+        <path class="ln-d" marker-end="url(#u2)" d="M820 194 H 442"/><text class="s h" x="560" y="188">OK at once (asynchronous)</text>
+
+        <path class="ln-r" marker-end="url(#u2)" d="M820 226 H 442"/><text class="s h" x="500" y="220">④ BeginTabletCopySession</text>
+        <rect class="b-raft" x="270" y="236" width="340" height="52" rx="4"/><text class="s c" x="440" y="256">source: pin WAL, open all blocks,</text><text class="s c" x="440" y="274">read superblock, snapshot Raft state</text>
+        <path class="ln-d" marker-end="url(#u2)" d="M440 308 H 818"/><text class="s h" x="480" y="302">superblock, WAL segment numbers, consensus state</text>
+        <rect class="b-disk" x="700" y="318" width="240" height="38" rx="4"/><text class="s c" x="820" y="334">write superblock:</text><text class="s c" x="820" y="348">TABLET_DATA_COPYING</text>
+
+        <path class="ln-r" marker-end="url(#u2)" d="M820 386 H 442"/><text class="s h" x="500" y="380">⑤ FetchData × many: blocks (4 threads), WAL segments</text>
+        <path class="ln-d" marker-end="url(#u2)" d="M440 404 H 818"/><text class="s h" x="540" y="418">chunks (up to 4 MiB each)</text>
+        <rect class="b-disk" x="650" y="432" width="290" height="52" rx="4"/><text class="s c" x="795" y="452">⑥ commit downloaded blocks (fsync),</text><text class="s c" x="795" y="470">replace superblock → TABLET_DATA_READY</text>
+        <path class="ln-r" marker-end="url(#u2)" d="M820 504 H 442"/><text class="s h" x="500" y="498">EndTabletCopySession (source releases the pin)</text>
+        <text class="s" x="140" y="540">⑦ target starts the replica; Raft catches up from the pinned op; the leader promotes it to VOTER</text>
+      </svg>
+      </div>
+      <figcaption>The target answers the leader's <code>StartTabletCopy</code> immediately, then does the download on its own thread pool (<code>--num_tablets_to_copy_simultaneously</code> = 10). Progress is not reported back to the leader; the leader simply keeps sending Raft updates and sees the replica appear when the copy is done.</figcaption>
+    </figure>
+    <div class="note">The leader promotes a caught-up NON_VOTER to VOTER itself (<code>RaftConsensus::NotifyPeerToPromote</code>). While the new replica is a non-voter it never counts toward a majority, so a slow or failed copy does not endanger the tablet's availability. This is the "3-4-3" scheme from part 4.</div>
+  </section>
+
+  <section id="inside">
+    <h2>What happens on each side</h2>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 420" role="img" aria-label="Left: source session pins the WAL and holds open blocks. Right: target downloads rowsets in parallel and WAL segments, then replaces the superblock. Bottom: the target's data state goes from copying to ready, or to tombstoned on failure.">
+        <defs><marker id="u3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="grp" x="20" y="14" width="440" height="270" rx="10"/><text class="s" x="34" y="34">Source: TabletCopySourceSession</text>
+        <rect class="b-raft" x="40" y="48" width="400" height="52" rx="6"/><text class="t" x="54" y="70">Pin the WAL</text><text class="s" x="54" y="88">block log GC, then anchor the latest op</text>
+        <rect class="b-disk" x="40" y="112" width="400" height="52" rx="6"/><text class="t" x="54" y="134">Open and cache every data block</text><text class="s" x="54" y="152">blocks stay readable for the whole session</text>
+        <rect class="b-disk" x="40" y="176" width="400" height="44" rx="6"/><text class="t" x="54" y="196">Snapshot superblock + committed Raft state</text><text class="s" x="54" y="212">taken after the log snapshot, so terms stay consistent</text>
+        <text class="s" x="40" y="246">Idle sessions expire after</text><text class="m" x="190" y="246">--tablet_copy_idle_timeout_sec=600</text>
+        <text class="s" x="40" y="266">Streams chunks of <tspan class="m">--tablet_copy_transfer_chunk_size_bytes</tspan> (4 MiB).</text>
+
+        <rect class="grp" x="520" y="14" width="440" height="270" rx="10"/><text class="s" x="534" y="34">Target: TabletCopyClient</text>
+        <rect class="b-ts" x="540" y="48" width="400" height="52" rx="6"/><text class="t" x="554" y="70">DownloadBlocks</text><text class="s" x="554" y="88">one task per rowset; 4 threads per session</text>
+        <rect class="b-ts" x="540" y="112" width="400" height="52" rx="6"/><text class="t" x="554" y="134">DownloadWALs</text><text class="s" x="554" y="152">old WAL dir deleted first; segments fetched in parallel</text>
+        <rect class="b-disk" x="540" y="176" width="400" height="44" rx="6"/><text class="t" x="554" y="196">Rewrite block IDs, verify chunks</text><text class="s" x="554" y="212">new local block IDs go into the new superblock</text>
+        <text class="s" x="540" y="246">Optional throttle:</text><text class="m" x="665" y="246">--tablet_copy_throttler_bytes_per_sec</text>
+        <text class="s" x="540" y="266">0 means unlimited; the limit applies per session.</text>
+        <path class="ln" marker-end="url(#u3)" d="M462 150 H 518"/><text class="s c" x="490" y="140">pull</text>
+
+        <text class="t" x="20" y="316">Data state of the target replica</text>
+        <rect class="b-disk" x="20" y="332" width="220" height="48" rx="6"/><text class="t c" x="130" y="362">TABLET_DATA_COPYING</text>
+        <rect class="b-ts" x="380" y="332" width="220" height="48" rx="6"/><text class="t c" x="490" y="362">TABLET_DATA_READY</text>
+        <rect class="b-raft" x="740" y="332" width="220" height="48" rx="6"/><text class="t c" x="850" y="362">TOMBSTONED</text>
+        <path class="ln" marker-end="url(#u3)" d="M240 356 H 378"/><text class="s c" x="309" y="348">Finish()</text>
+        <path class="ln-r" marker-end="url(#u3)" d="M240 380 C 400 410, 640 410, 738 372"/><text class="s c" x="490" y="410">Abort() or crash: downloaded data dropped</text>
+      </svg>
+      </div>
+      <figcaption>The pinned WAL is the key safety trick: if the copy takes minutes while the leader keeps accepting writes, the leader must not delete the segment the new replica will need afterwards. The source pins the op that was last in the log when the snapshot was taken, and the target releases it by ending the session. A tablet that fails mid-copy is left in a state that cannot serve data, and the next copy attempt replaces it.</figcaption>
+    </figure>
+    <div class="prose">
+      <p><strong>Replacing an existing replica.</strong> A server that already holds a tombstoned replica of the tablet can be the target. The client first calls <code>SetTabletToReplace</code> with the leader's term; if the term is lower than what the local consensus metadata remembers, the copy is refused. That protects against a stale leader overwriting newer state.</p>
+      <p><strong>Errors and retries.</strong> A copy that cannot finish is cleaned up locally and the leader tries again the next time it sees the replica missing (the exchange still says <code>TABLET_NOT_FOUND</code> or the replica is tombstoned). The begin and end calls time out after <code>--tablet_copy_begin_session_timeout_ms</code> (30 s).</p>
+      <p><strong>Metrics</strong> you can watch on both sides: <code>tablet_copy_bytes_fetched</code>, <code>tablet_copy_bytes_sent</code>, <code>tablet_copy_open_client_sessions</code>, <code>tablet_copy_open_source_sessions</code> and the duration histograms.</p>
+    </div>
+  </section>
+
+  <section id="move">
+    <h2>Moving a replica: add first, remove later</h2>
+    <div class="prose">
+      <p>Kudu never moves a replica by deleting it and hoping. A move is a configuration change in two parts, using the "replace" attribute introduced for the 3-4-3 scheme. The tool (or the master during re-replication) only <em>asks</em>; the leader and the master carry it out.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 330" role="img" aria-label="Four stages of a replica move: initial three voters, then a non-voter added and the source marked replace, then the new replica promoted, then the old replica removed.">
+        <defs><marker id="u4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="t" x="20" y="24">Move one replica of a tablet from server A to server D</text>
+        <g id="stage1">
+          <text class="s" x="20" y="54">1. Start</text>
+          <rect class="b-ts" x="20" y="64" width="100" height="40" rx="5"/><text class="t c" x="70" y="89">A  voter</text>
+          <rect class="b-ts" x="20" y="112" width="100" height="40" rx="5"/><text class="t c" x="70" y="137">B  voter</text>
+          <rect class="b-ts" x="20" y="160" width="100" height="40" rx="5"/><text class="t c" x="70" y="185">C  voter</text>
+          <rect class="grp" x="20" y="208" width="100" height="40" rx="5"/><text class="s c" x="70" y="233">D  (empty)</text>
+        </g>
+        <g>
+          <text class="s" x="260" y="54">2. Mark and add (one config change)</text>
+          <rect class="b-raft" x="260" y="64" width="190" height="40" rx="5"/><text class="t c" x="355" y="89">A  voter, REPLACE</text>
+          <rect class="b-ts" x="260" y="112" width="190" height="40" rx="5"/><text class="t c" x="355" y="137">B  voter</text>
+          <rect class="b-ts" x="260" y="160" width="190" height="40" rx="5"/><text class="t c" x="355" y="185">C  voter</text>
+          <rect class="b-master" x="260" y="208" width="190" height="40" rx="5"/><text class="t c" x="355" y="233">D  NON_VOTER, promote</text>
+          <text class="s" x="260" y="270">D gets its data by tablet copy</text>
+        </g>
+        <g>
+          <text class="s" x="520" y="54">3. Caught up: promote</text>
+          <rect class="b-raft" x="520" y="64" width="190" height="40" rx="5"/><text class="t c" x="615" y="89">A  voter, REPLACE</text>
+          <rect class="b-ts" x="520" y="112" width="190" height="40" rx="5"/><text class="t c" x="615" y="137">B  voter</text>
+          <rect class="b-ts" x="520" y="160" width="190" height="40" rx="5"/><text class="t c" x="615" y="185">C  voter</text>
+          <rect class="b-ts" x="520" y="208" width="190" height="40" rx="5"/><text class="t c" x="615" y="233">D  voter</text>
+          <text class="s" x="520" y="270">4 voters: the leader did this</text>
+        </g>
+        <g>
+          <text class="s" x="780" y="54">4. Evict the old one</text>
+          <rect class="grp" x="780" y="64" width="170" height="40" rx="5"/><text class="s c" x="865" y="89">A  removed, tombstoned</text>
+          <rect class="b-ts" x="780" y="112" width="170" height="40" rx="5"/><text class="t c" x="865" y="137">B  voter</text>
+          <rect class="b-ts" x="780" y="160" width="170" height="40" rx="5"/><text class="t c" x="865" y="185">C  voter</text>
+          <rect class="b-ts" x="780" y="208" width="170" height="40" rx="5"/><text class="t c" x="865" y="233">D  voter</text>
+          <text class="s" x="780" y="270">the master does this</text>
+        </g>
+        <path class="ln" marker-end="url(#u4)" d="M130 156 H 256"/><path class="ln" marker-end="url(#u4)" d="M455 156 H 516"/><path class="ln" marker-end="url(#u4)" d="M715 156 H 776"/>
+        <text class="s" x="20" y="310">The tablet always has at least three voters until the very end, so a failure in the middle of a move never lowers fault tolerance.</text>
+      </svg>
+      </div>
+      <figcaption>This is <code>ScheduleReplicaMove</code> in <code>tools/tool_replica_util.cc</code>: it sets <code>replace=true</code> on the source and adds the target as a non-voter with <code>promote=true</code> in one bulk change, guarded by a compare-and-swap on the config's op index. The same mechanism handles failed replicas: with <code>--raft_prepare_replacement_before_eviction</code> (default true), a failed replica is evicted only after its replacement is ready. If the leader is the replica marked for replacement, the master first makes it step down (<code>--catalog_manager_step_down_leader_for_replacement</code>). Clusters still on the old 3-2-3 scheme add the new replica first and remove the old one afterwards; the tool detects this.</figcaption>
+    </figure>
+    <div class="prose">
+      <p>Automatic re-replication uses the same pieces. A leader that cannot reach a follower for <code>--follower_unavailable_considered_failed_sec</code> (300 s) marks it failed; with <code>--evict_failed_followers</code> (true) it is replaced as above. The master also removes excess replicas (<code>--catalog_manager_evict_excess_replicas</code>) and tombstones replicas that are no longer in the latest configuration (<code>--master_tombstone_evicted_tablet_replicas</code>).</p>
+    </div>
+  </section>
+
+  <section id="algo">
+    <h2>Rebalancing: deciding what to move</h2>
+    <div class="prose">
+      <p>Kudu has no background balancer on the servers. Placement of new tablets is already spread by the master, but after you add servers, or after a failure and re-replication, the cluster can become lopsided. Balance is restored by running <code>kudu cluster rebalance</code>, an ordinary CLI tool that reads cluster state, plans moves and issues the replica moves above through the same RPCs any admin would.</p>
+      <p>The planner is a greedy, two-dimensional algorithm (<code>rebalance/rebalance_algo.h</code>). <strong>Skew</strong> of a table is the difference between the most and the least loaded tablet server for that table; skew of the cluster is the same for total replica counts. The cluster is "balanced" when every table has skew ≤ 1 and the cluster skew is ≤ 1. Each step picks a move that lowers the skew of the most skewed table and, among those, prefers one that also lowers the cluster skew.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 360" role="img" aria-label="Replica counts per server for two tables before and after a rebalance when a fourth server is added.">
+        <defs><marker id="u5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="t" x="20" y="24">Before: a new server D was just added</text>
+        <text class="t" x="520" y="24">After the rebalancer</text>
+        <path class="life" d="M20 280 H 460"/><path class="life" d="M520 280 H 960"/>
+        <g>
+          <rect class="b-ts" x="50" y="200" width="60" height="80" rx="2"/><rect class="b-raft" x="50" y="120" width="60" height="80" rx="2"/>
+          <rect class="b-ts" x="150" y="200" width="60" height="80" rx="2"/><rect class="b-raft" x="150" y="120" width="60" height="80" rx="2"/>
+          <rect class="b-ts" x="250" y="200" width="60" height="80" rx="2"/><rect class="b-raft" x="250" y="120" width="60" height="80" rx="2"/>
+          <text class="s" x="350" y="274">D: empty</text>
+          <text class="t c" x="80" y="300">A</text><text class="t c" x="180" y="300">B</text><text class="t c" x="280" y="300">C</text><text class="t c" x="380" y="300">D</text>
+          <text class="s" x="20" y="326">Per-table skew: 4 − 0 = 4 for each table; cluster skew: 8 − 0 = 8</text>
+        </g>
+        <g>
+          <rect class="b-ts" x="550" y="220" width="60" height="60" rx="2"/><rect class="b-raft" x="550" y="160" width="60" height="60" rx="2"/>
+          <rect class="b-ts" x="650" y="220" width="60" height="60" rx="2"/><rect class="b-raft" x="650" y="160" width="60" height="60" rx="2"/>
+          <rect class="b-ts" x="750" y="220" width="60" height="60" rx="2"/><rect class="b-raft" x="750" y="160" width="60" height="60" rx="2"/>
+          <rect class="b-ts" x="850" y="220" width="60" height="60" rx="2"/><rect class="b-raft" x="850" y="160" width="60" height="60" rx="2"/>
+          <text class="t c" x="580" y="300">A</text><text class="t c" x="680" y="300">B</text><text class="t c" x="780" y="300">C</text><text class="t c" x="880" y="300">D</text>
+          <text class="s" x="520" y="326">Per-table skew 0, cluster skew 0: nothing left to move (3 moves per table)</text>
+        </g>
+        <path class="ln" marker-end="url(#u5)" d="M470 160 H 510"/>
+        <text class="s" x="20" y="350">Teal and rust are two tables, each with 12 replicas. The numbers are illustrative, not from a real cluster.</text>
+      </svg>
+      </div>
+      <figcaption>Why two dimensions? Balancing only the total could leave one table entirely on a few servers, which would make scans of that table hit few machines. Balancing per table first, and the cluster total second, avoids that. Tie-breaks between equally skewed candidates are random, and <code>--prefer_follower_replica_moves</code> (default true) makes the planner prefer a source server that hosts a follower, so rebalancing disturbs leadership less.</figcaption>
+    </figure>
+    <div class="prose">
+      <p><strong>Range rebalancing.</strong> With <code>--enable_range_rebalancing</code> (true), the rebalancer also balances each range partition of a table separately, so one hot time range does not end up on one server. <strong>Moves are real work</strong>: each is a tablet copy plus a config change, so the tool limits concurrency to <code>--max_moves_per_server</code> (5), counting "move from" and "move to" separately.</p>
+    </div>
+  </section>
+
+  <section id="tool">
+    <h2>Running the rebalancer</h2>
+    <ol class="steps">
+      <li>Start with a report: <code>kudu cluster rebalance &lt;masters&gt; --report_only</code>. It prints per-table and per-server skew and exits. Add <code>--output_replica_distribution_details</code> for the full tables.</li>
+      <li>Run it for real. It first reports, then schedules moves in waves, checks each for completion (the new replica is a voter and the old one is gone) and re-reads the cluster state until nothing is left to do.</li>
+      <li>It is safe to stop at any time: a half-finished move is just a normal configuration change, and a re-run continues from the current state. Use <code>--max_run_time_sec</code> to bound a run and <code>--tables</code> to limit it to certain tables (then it does not balance the cluster as a whole).</li>
+      <li>All registered tablet servers must be up, otherwise the tool exits, to avoid fighting with automatic re-replication. Servers you are about to decommission can be listed in <code>--ignored_tservers</code>; with <code>--move_replicas_from_ignored_tservers</code> (and the servers in maintenance mode) the tool drains them.</li>
+    </ol>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Phase (rack-aware clusters)</th><th>Goal</th><th>Skip with</th></tr></thead>
+        <tbody>
+          <tr><td>1. Policy fixer</td><td>reestablish the placement policy, so no tablet has a majority of replicas in one location</td><td><code>--disable_policy_fixer</code></td></tr>
+          <tr><td>2. Cross-location</td><td>even out replicas per server between locations (load = replicas ÷ servers in the location)</td><td><code>--disable_cross_location_rebalancing</code></td></tr>
+          <tr><td>3. Intra-location</td><td>balance within each location as if it were a cluster on its own, in parallel across locations</td><td><code>--disable_intra_location_rebalancing</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note">The version table in <code>docs/administration.adoc</code> says the tool cannot move replication-factor-1 tablets on clusters older than 1.7.1 and does nothing for clusters older than 1.4.0. <code>--move_single_replicas=auto</code> picks the right behavior. After adding servers, the docs advise running the rebalancer once the new servers are up, and it can run while the cluster serves traffic.</div>
+  </section>
+
+  <section id="flags">
+    <h2>Flags worth knowing</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Flag</th><th>Default</th><th>Where</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><code>--num_tablets_to_copy_simultaneously</code></td><td>10</td><td>tablet server</td><td>threads that run copies on a target</td></tr>
+          <tr><td><code>--tablet_copy_download_threads_nums_per_session</code></td><td>4</td><td>tablet server</td><td>parallel block downloads per copy</td></tr>
+          <tr><td><code>--tablet_copy_throttler_bytes_per_sec</code></td><td>0 (off)</td><td>tablet server</td><td>cap on copy speed per session</td></tr>
+          <tr><td><code>--tablet_copy_transfer_chunk_size_bytes</code></td><td>4 MiB</td><td>tablet server</td><td>size of each FetchData chunk</td></tr>
+          <tr><td><code>--tablet_copy_idle_timeout_sec</code></td><td>600</td><td>tablet server</td><td>source drops idle sessions</td></tr>
+          <tr><td><code>--log_max_segments_to_retain</code></td><td>80</td><td>tablet server</td><td>log kept so slow peers can catch up by replay</td></tr>
+          <tr><td><code>--follower_unavailable_considered_failed_sec</code></td><td>300</td><td>tablet server</td><td>when an unreachable follower is evicted</td></tr>
+          <tr><td><code>--evict_failed_followers</code></td><td>true</td><td>tablet server</td><td>allow eviction at all</td></tr>
+          <tr><td><code>--raft_prepare_replacement_before_eviction</code></td><td>true</td><td>tablet server</td><td>3-4-3: add the replacement first</td></tr>
+          <tr><td><code>--max_moves_per_server</code></td><td>5</td><td>rebalancer CLI</td><td>concurrent moves per server</td></tr>
+          <tr><td><code>--max_run_time_sec</code></td><td>0 (no limit)</td><td>rebalancer CLI</td><td>time budget</td></tr>
+          <tr><td><code>--max_staleness_interval_sec</code></td><td>300</td><td>rebalancer CLI</td><td>give up if no progress is possible for this long</td></tr>
+          <tr><td><code>--load_imbalance_threshold</code></td><td>1.0</td><td>rebalancer CLI</td><td>lower = tidier locations, higher = fewer moves</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note">The flag text says the copy-speed limit applies per server "for one session"; check how it behaves with several simultaneous copies before relying on it as a total bandwidth cap.</div>
+  </section>
+
+  <section id="src">
+    <h2>Where to read the code</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>File</th><th>What is in it</th></tr></thead>
+        <tbody>
+          <tr><td><code>tserver/tablet_copy.proto</code></td><td>the four RPCs: <code>BeginTabletCopySession</code>, <code>CheckSessionActive</code>, <code>FetchData</code>, <code>EndTabletCopySession</code></td></tr>
+          <tr><td><code>tserver/tablet_copy_service.cc</code>, <code>tablet_copy_source_session.cc</code></td><td>the source side: sessions, WAL pin, block and log reads</td></tr>
+          <tr><td><code>tserver/tablet_copy_client.cc</code></td><td>the target side: Start, FetchAll, Finish, Abort</td></tr>
+          <tr><td><code>tserver/ts_tablet_manager.cc</code> (<code>StartTabletCopy</code>, <code>RunTabletCopy</code>)</td><td>queueing the copy and registering the replica</td></tr>
+          <tr><td><code>consensus/consensus_queue.cc</code>, <code>consensus_peers.cc</code></td><td>how the leader notices the need and sends <code>StartTabletCopy</code></td></tr>
+          <tr><td><code>tools/tool_replica_util.cc</code></td><td><code>ScheduleReplicaMove</code>, <code>CheckCompleteMove</code>, <code>SetReplace</code></td></tr>
+          <tr><td><code>rebalance/rebalance_algo.cc</code>, <code>rebalancer.cc</code></td><td>the planning algorithms</td></tr>
+          <tr><td><code>tools/rebalancer_tool.cc</code>, <code>tool_action_cluster.cc</code></td><td>the CLI driver and its flags</td></tr>
+          <tr><td><code>docs/design-docs/raft-tablet-copy.md</code>, <code>raft-config-change.md</code>, <code>docs/administration.adoc</code></td><td>design background and the operator guide</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
