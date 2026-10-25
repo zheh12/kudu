@@ -1,0 +1,516 @@
+<title>Kudu Raft Tutorial</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column; wide figures scroll inside their own frame on phones.
+   Palette is keyed to the roles in the system: client (ochre), master (indigo), tablet server (teal), Raft/WAL (rust), disk (slate). */
+:root {
+  --bg: #f4f7f8; --surf: #ffffff; --fg: #14212b; --muted: #55646e; --line: #d0d9df; --line2: #8fa0ab;
+  --client: #a9680f; --client-t: #fbeed6;
+  --master: #4a4db8; --master-t: #e6e7fa;
+  --ts: #0d7566; --ts-t: #d9f1ed;
+  --raft: #bb4a22; --raft-t: #fae3d9;
+  --disk: #52646f; --disk-t: #e6ecef;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+    --client: #e3ad50; --client-t: #3a2f17;
+    --master: #a1a3f5; --master-t: #25284d;
+    --ts: #4fc9b4; --ts-t: #11322d;
+    --raft: #f2905f; --raft-t: #3d2218;
+    --disk: #a3b4bf; --disk-t: #22323c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+  --client: #e3ad50; --client-t: #3a2f17;
+  --master: #a1a3f5; --master-t: #25284d;
+  --ts: #4fc9b4; --ts-t: #11322d;
+  --raft: #f2905f; --raft-t: #3d2218;
+  --disk: #a3b4bf; --disk-t: #22323c;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.65 var(--body);
+  padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.prose { max-width: 68ch; display: flex; flex-direction: column; gap: 12px; }
+p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.1rem; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+code { font: 500 .88em var(--mono); background: var(--disk-t); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--master); }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { background: var(--surf); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { font-size: .92rem; color: var(--muted); max-width: 78ch; }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.role { background: var(--surf); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role h3 { color: var(--c); }
+.role p, .role li { font-size: .95rem; }
+.role ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; max-width: 76ch; }
+.note { border-left: 3px solid var(--raft); padding: 4px 0 4px 14px; color: var(--muted); max-width: 68ch; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font: 500 13px var(--mono); text-decoration: none; color: var(--fg); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+/* SVG vocabulary */
+svg text { font-family: var(--body); fill: var(--fg); font-size: 13px; }
+svg .t { font-weight: 600; }
+svg .s { font-size: 11.5px; fill: var(--muted); }
+svg .m { font-family: var(--mono); font-size: 11.5px; }
+svg .h { paint-order: stroke; stroke: var(--surf); stroke-width: 5px; stroke-linejoin: round; }
+svg .c { text-anchor: middle; }
+svg .e { text-anchor: end; }
+svg .box { fill: var(--surf); stroke: var(--line2); stroke-width: 1.4; }
+svg .grp { fill: none; stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .b-client { fill: var(--client-t); stroke: var(--client); stroke-width: 1.5; }
+svg .b-master { fill: var(--master-t); stroke: var(--master); stroke-width: 1.5; }
+svg .b-ts { fill: var(--ts-t); stroke: var(--ts); stroke-width: 1.5; }
+svg .b-raft { fill: var(--raft-t); stroke: var(--raft); stroke-width: 1.5; }
+svg .b-disk { fill: var(--disk-t); stroke: var(--disk); stroke-width: 1.5; }
+svg .solid-ts { fill: var(--ts); stroke: var(--ts); }
+svg .solid-ts + text, svg text.on { fill: var(--surf); }
+svg .ln { fill: none; stroke: currentColor; stroke-width: 1.5; }
+svg .ln-r { fill: none; stroke: var(--raft); stroke-width: 1.6; stroke-dasharray: 6 4; }
+svg .ln-d { fill: none; stroke: var(--line2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+svg .life { stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 3 5; }
+</style>
+
+<main>
+  <header class="prose">
+    <span class="eyebrow">Learning Kudu · Part 4</span>
+    <h1>Raft in Kudu</h1>
+    <p class="lede">Every tablet is its own small Raft group. Raft is what lets three copies of a tablet agree on the order of writes, survive the loss of a server, and elect a new leader without losing an acknowledged write. This part follows an operation through the leader, shows how elections and membership changes work, and ends with tablet copy.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#group">One group per tablet</a><a href="#roles">Roles</a><a href="#replicate">Replication</a><a href="#watermarks">Watermarks</a><a href="#follower">Follower side</a><a href="#election">Elections</a><a href="#config">Membership</a><a href="#copy">Tablet copy</a><a href="#wal">WAL</a><a href="#ops">Errors &amp; tuning</a><a href="#map">Source map</a>
+    </nav>
+  </header>
+
+  <section id="group">
+    <h2>One Raft group per tablet</h2>
+    <div class="prose">
+      <p>A Raft group is a set of replicas that keep an identical, ordered log of operations. Each tablet replica has its own <code>RaftConsensus</code> object and its own write-ahead log (WAL). A tablet server that hosts 500 replicas therefore takes part in 500 independent groups, each with its own leader and its own term. The master's <code>sys.catalog</code> is just another tablet, so the same code keeps the masters in agreement.</p>
+      <p>Three words matter throughout. A <strong>term</strong> is a number that grows every time an election starts, and each term has at most one leader. An <strong>OpId</strong> is <code>term.index</code>, the position of an operation in the log. An operation is <strong>committed</strong> once a majority of voters have it in their WAL.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 360" role="img" aria-label="Three replicas of one tablet on three servers. The leader sends UpdateConsensus to followers. Each replica has a RaftConsensus object, a WAL and a consensus metadata file.">
+        <defs><marker id="d1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">ONE TABLET, THREE REPLICAS, ONE RAFT GROUP</text>
+        <g>
+          <rect class="grp" x="20" y="36" width="270" height="226" rx="8"/><text class="t" x="34" y="60">Tablet server 1</text>
+          <rect class="b-ts" x="40" y="74" width="230" height="52" rx="6"/><text class="t" x="52" y="96">Replica: LEADER</text><text class="s" x="52" y="114">term 7, last op 7.412</text>
+          <rect class="b-raft" x="40" y="136" width="230" height="52" rx="6"/><text class="t" x="52" y="158">WAL</text><text class="s" x="52" y="176">ordered log of operations</text>
+          <rect class="b-disk" x="40" y="198" width="230" height="52" rx="6"/><text class="t" x="52" y="220">Consensus metadata</text><text class="s" x="52" y="238">term, vote, committed config</text>
+
+          <rect class="grp" x="355" y="36" width="270" height="226" rx="8"/><text class="t" x="369" y="60">Tablet server 2</text>
+          <rect class="b-ts" x="375" y="74" width="230" height="52" rx="6"/><text class="t" x="387" y="96">Replica: FOLLOWER</text><text class="s" x="387" y="114">term 7, last op 7.411</text>
+          <rect class="b-raft" x="375" y="136" width="230" height="52" rx="6"/><text class="t" x="387" y="158">WAL</text><text class="s" x="387" y="176">same entries, one behind</text>
+          <rect class="b-disk" x="375" y="198" width="230" height="52" rx="6"/><text class="t" x="387" y="220">Consensus metadata</text><text class="s" x="387" y="238">term 7, voted for server 1</text>
+
+          <rect class="grp" x="690" y="36" width="270" height="226" rx="8"/><text class="t" x="704" y="60">Tablet server 3</text>
+          <rect class="b-ts" x="710" y="74" width="230" height="52" rx="6"/><text class="t" x="722" y="96">Replica: FOLLOWER</text><text class="s" x="722" y="114">term 7, last op 7.412</text>
+          <rect class="b-raft" x="710" y="136" width="230" height="52" rx="6"/><text class="t" x="722" y="158">WAL</text><text class="s" x="722" y="176">same entries</text>
+          <rect class="b-disk" x="710" y="198" width="230" height="52" rx="6"/><text class="t" x="722" y="220">Consensus metadata</text><text class="s" x="722" y="238">term 7, voted for server 1</text>
+        </g>
+        <path class="ln-r" marker-end="url(#d1)" d="M270 92 H 373"/><path class="ln-r" marker-end="url(#d1)" d="M270 82 C 330 24, 650 24, 708 82"/>
+        <rect class="b-client" x="20" y="286" width="940" height="60" rx="6"/>
+        <text class="t" x="34" y="310">Dashed rust arrows: UpdateConsensus</text><text class="s" x="34" y="328">The leader pushes new operations to every follower, or an empty heartbeat every 500 ms when idle.</text><text class="s" x="34" y="342">Followers never write to the log on their own. A candidate in an election uses RequestVote instead.</text>
+      </svg>
+      </div>
+      <figcaption>The example numbers are made up. Server 2 is one operation behind, which is normal: it will catch up on the next message, and the group stays healthy as long as a majority (2 of 3) has each committed operation.</figcaption>
+    </figure>
+  </section>
+
+  <section id="roles">
+    <h2>Replica roles and how they change</h2>
+    <div class="prose">
+      <p>A replica is a <code>VOTER</code> or a <code>NON_VOTER</code>. Voters count towards majorities and can lead. Non-voters only receive the log, which is how a new replica catches up before it is trusted. Among voters, a replica is either a follower or the leader; being a candidate is a short-lived activity of a follower, not a stored role.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 410" role="img" aria-label="State diagram: follower to pre-election after missing heartbeats, then election with new term, then leader. Seeing a higher term returns any state to follower.">
+        <defs><marker id="d2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-ts" x="20" y="150" width="150" height="70" rx="8"/><text class="t c" x="95" y="180">FOLLOWER</text><text class="s c" x="95" y="200">waits for heartbeats</text>
+        <rect class="b-client" x="270" y="150" width="170" height="70" rx="8"/><text class="t c" x="355" y="176">PRE-ELECTION</text><text class="s c" x="355" y="194">"would you vote for me?"</text><text class="s c" x="355" y="210">term not changed</text>
+        <rect class="b-raft" x="540" y="150" width="170" height="70" rx="8"/><text class="t c" x="625" y="176">ELECTION</text><text class="s c" x="625" y="194">term + 1, vote for self,</text><text class="s c" x="625" y="210">ask for real votes</text>
+        <rect class="b-master" x="810" y="150" width="150" height="70" rx="8"/><text class="t c" x="885" y="180">LEADER</text><text class="s c" x="885" y="200">replicates the log</text>
+
+        <path class="ln" marker-end="url(#d2)" d="M170 185 H 268"/><text class="s c" x="219" y="124">no heartbeat for</text><text class="s c" x="219" y="140">1.5 s (3 × 500 ms)</text>
+        <path class="ln" marker-end="url(#d2)" d="M440 185 H 538"/><text class="s c" x="489" y="140">majority</text><text class="s c" x="489" y="156">says yes</text>
+        <path class="ln" marker-end="url(#d2)" d="M710 185 H 808"/><text class="s c" x="759" y="140">majority</text><text class="s c" x="759" y="156">votes</text>
+
+        <path class="ln-d" marker-end="url(#d2)" d="M355 220 C 355 300, 130 300, 110 222"/><text class="s c" x="230" y="306">too few yes votes: stay follower</text>
+        <path class="ln-d" marker-end="url(#d2)" d="M625 220 C 625 410, 95 410, 80 222"/><text class="s c" x="360" y="378">election lost or timed out: back off, then try again</text>
+        <path class="ln-r" marker-end="url(#d2)" d="M885 150 C 885 40, 95 40, 95 148"/><text class="s h c" x="490" y="56" fill="var(--raft)">any message with a higher term, from anyone: step down, adopt the term</text>
+
+        <rect class="b-disk" x="20" y="242" width="150" height="52" rx="6" style="display:none"/>
+      </svg>
+      </div>
+      <figcaption>Pre-election is Kudu's guard against a replica that was only briefly cut off. Without it, the isolated replica would bump its term on every failed attempt, and its inflated term would then force a healthy leader to step down when it came back. The cost of a failed election grows by a factor of 1.5 each time, up to an extra 20 seconds, with random jitter so replicas don't collide.</figcaption>
+    </figure>
+  </section>
+
+  <section id="replicate">
+    <h2>Replicating an operation</h2>
+    <div class="prose">
+      <p>This is the leader's side of every write, schema change and membership change. The tablet layer hands the leader a <code>ConsensusRound</code> wrapping one operation. Consensus numbers it, writes it to the leader's own WAL, and ships it to each follower in parallel. When a majority has it, the commit index moves and the operation is applied.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 560" role="img" aria-label="Leader-side components: RaftConsensus assigns an OpId and adds the round to pending rounds and the queue; the log appends it while peers send UpdateConsensus to followers; acknowledgements advance watermarks and the commit index, which applies pending rounds.">
+        <defs><marker id="d3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="grp" x="10" y="8" width="640" height="544" rx="10"/><text class="s" x="24" y="28">leader replica</text>
+        <rect class="b-ts" x="30" y="42" width="600" height="58" rx="6"/><text class="t" x="44" y="66">TabletReplica / OpDriver</text><text class="s" x="44" y="86">① builds a ConsensusRound around the operation (a write, alter, or config change) and calls Replicate()</text>
+        <rect class="b-raft" x="30" y="124" width="600" height="58" rx="6"/><text class="t" x="44" y="148">RaftConsensus::Replicate</text><text class="s" x="44" y="168">② checks it is the ready leader, binds the term, assigns OpId = term.next index, records the round as pending</text>
+        <path class="ln" marker-end="url(#d3)" d="M330 100 V122"/><path class="ln" marker-end="url(#d3)" d="M330 182 V212"/>
+
+        <rect class="b-master" x="30" y="214" width="600" height="116" rx="6"/><text class="t" x="44" y="238">PeerMessageQueue + LogCache</text><text class="s" x="44" y="258">③ holds recent operations in memory and tracks, per follower: next index to send, last index it acknowledged,</text><text class="s" x="44" y="276">health. Computes the watermarks from those acknowledgements.</text>
+        <rect class="b-raft" x="44" y="290" width="270" height="30" rx="4"/><text class="s c" x="179" y="310">④a Log: append to WAL (group commit)</text>
+        <rect class="b-client" x="330" y="290" width="286" height="30" rx="4"/><text class="s c" x="473" y="310">④b PeerManager wakes one Peer per follower</text>
+        <path class="ln" marker-end="url(#d3)" d="M179 330 V 360"/><path class="ln" marker-end="url(#d3)" d="M473 330 V 360"/>
+        <rect class="b-disk" x="30" y="362" width="270" height="46" rx="6"/><text class="t" x="44" y="382">WAL segments on disk</text><text class="s" x="44" y="398">the leader's own copy counts as one ack</text>
+        <rect class="b-client" x="330" y="362" width="300" height="46" rx="6"/><text class="t" x="344" y="382">Peer: UpdateConsensus RPC</text><text class="s" x="344" y="398">up to 1 MB of ops per batch, one RPC in flight</text>
+
+        <rect class="b-master" x="30" y="436" width="600" height="46" rx="6"/><text class="t" x="44" y="456">⑥ ack arrives: queue recomputes majority-replicated index → commit index</text><text class="s" x="44" y="474">only if that op belongs to the leader's current term (see the next section)</text>
+        <rect class="b-ts" x="30" y="498" width="600" height="40" rx="6"/><text class="t" x="44" y="522">⑦ NotifyCommitIndex → pending rounds up to that index are applied, callers are answered</text>
+        <path class="ln" marker-end="url(#d3)" d="M600 410 V 434" style="display:none"/>
+        <path class="ln" marker-end="url(#d3)" d="M330 482 V 496"/>
+
+        <rect class="b-ts" x="700" y="362" width="260" height="46" rx="6"/><text class="t" x="714" y="382">Followers</text><text class="s" x="714" y="398">⑤ append to their WAL, then ack</text>
+        <path class="ln-r" marker-end="url(#d3)" d="M630 385 H 698"/>
+        <path class="ln-r" marker-end="url(#d3)" d="M830 408 C 830 460, 700 460, 632 459"/><text class="s h" x="668" y="494" fill="var(--raft)">acks carry last</text><text class="s h" x="668" y="510" fill="var(--raft)">received op id</text>
+        <text class="s" x="700" y="42">④a and ④b run at the same time, so the</text><text class="s" x="700" y="60">leader's disk write and the network round</text><text class="s" x="700" y="78">trip overlap. A follower ack is what turns</text><text class="s" x="700" y="96">"written locally" into "durable on a majority".</text>
+      </svg>
+      </div>
+      <figcaption>Part 1 showed this as a single box called "replicate". The commit step also runs for followers: the leader piggybacks its commit index on the next UpdateConsensus, and each follower applies operations up to that index. Operations that are not yet committed sit in the follower's WAL but are not applied.</figcaption>
+    </figure>
+  </section>
+
+  <section id="watermarks">
+    <h2>Three indexes that describe progress</h2>
+    <div class="prose">
+      <p>The queue keeps three watermarks over the log. They answer different questions, and the third one is the one that matters for safety.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 380" role="img" aria-label="Log indexes 1 to 12 for three replicas, with markers for all replicated index 8, majority replicated and committed index 10, and last appended index 12.">
+        <text class="s" x="20" y="22">LEADER'S VIEW OF EACH REPLICA'S LOG, ONE CELL PER INDEX (example)</text>
+        <g class="m">
+          <text class="s c" x="190" y="58">1</text><text class="s c" x="250" y="58">2</text><text class="s c" x="310" y="58">3</text><text class="s c" x="370" y="58">4</text><text class="s c" x="430" y="58">5</text><text class="s c" x="490" y="58">6</text><text class="s c" x="550" y="58">7</text><text class="s c" x="610" y="58">8</text><text class="s c" x="670" y="58">9</text><text class="s c" x="730" y="58">10</text><text class="s c" x="790" y="58">11</text><text class="s c" x="850" y="58">12</text>
+        </g>
+        <text class="t" x="20" y="92">Leader</text><text class="t" x="20" y="152">Follower 1</text><text class="t" x="20" y="212">Follower 2</text>
+        <g>
+          <rect class="b-ts" x="164" y="68" width="720" height="38" rx="3"/>
+          <rect class="b-ts" x="164" y="128" width="600" height="38" rx="3"/>
+          <rect class="b-ts" x="164" y="188" width="480" height="38" rx="3"/>
+        </g>
+        <path class="life" d="M280 62 V 240 M340 62 V 240 M400 62 V 240 M460 62 V 240 M520 62 V 240 M580 62 V 240 M640 62 V 240 M700 62 V 240 M760 62 V 240 M820 62 V 240 M220 62 V 240"/>
+        <text class="s" x="896" y="92">has 1 to 12</text><text class="s" x="776" y="152">has 1 to 10</text><text class="s" x="656" y="212">has 1 to 8</text>
+
+        <path class="ln-d" d="M644 232 V 252"/><path class="ln-d" d="M764 232 V 296"/><path class="ln-d" d="M884 232 V 340"/>
+        <rect class="b-raft" x="360" y="252" width="284" height="40" rx="5"/><text class="t" x="372" y="270">all_replicated_index = 8</text><text class="s" x="372" y="286">every replica has it; the log may be GC'd up to here</text>
+        <rect class="b-master" x="440" y="296" width="324" height="40" rx="5"/><text class="t" x="452" y="314">majority_replicated = committed = 10</text><text class="s" x="452" y="330">2 of 3 voters have it; safe to apply</text>
+        <rect class="b-client" x="560" y="340" width="324" height="34" rx="5"/><text class="t" x="572" y="361">last_appended = 12</text><text class="s" x="702" y="361">written, not yet safe</text>
+      </svg>
+      </div>
+      <figcaption>Think of them as <code>all_replicated ≤ committed ≤ last_appended</code>. Indexes 11 and 12 can still be lost if the leader dies now. Indexes up to 10 never can. There is one extra rule from the Raft paper: the leader only advances the commit index to a majority-replicated operation from <em>its own term</em>, and that is why a new leader writes a no-op first (see Elections).</figcaption>
+    </figure>
+  </section>
+
+  <section id="follower">
+    <h2>What a follower checks before accepting</h2>
+    <div class="prose">
+      <p>A follower does not trust the leader blindly. Every <code>UpdateConsensus</code> carries the OpId of the entry <em>just before</em> the new ones. The follower accepts the batch only if its own log has that entry. This one check is Raft's log matching property, and it is how divergent logs repair themselves.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 470" role="img" aria-label="Follower checks in order: leader term not older, preceding op matches, conflicting entries truncated, then append and apply up to the commit index. Example shows a follower dropping uncommitted entries from an old term.">
+        <defs><marker id="d4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-master" x="20" y="20" width="440" height="58" rx="6"/><text class="t" x="34" y="44">① Is the leader's term at least mine?</text><text class="s" x="34" y="64">no: reject with INVALID_TERM and tell the sender my higher term</text>
+        <rect class="b-master" x="20" y="98" width="440" height="58" rx="6"/><text class="t" x="34" y="122">② Higher term than mine? Adopt it, step down</text><text class="s" x="34" y="142">persist the new term, remember who the leader is</text>
+        <rect class="b-master" x="20" y="176" width="440" height="58" rx="6"/><text class="t" x="34" y="200">③ Drop operations I already have</text><text class="s" x="34" y="220">retries and overlapping batches are harmless</text>
+        <rect class="b-raft" x="20" y="254" width="440" height="58" rx="6"/><text class="t" x="34" y="278">④ Do I have the entry just before the batch?</text><text class="s" x="34" y="298">no: reply with my last op so the leader backs up and resends from there</text>
+        <rect class="b-raft" x="20" y="332" width="440" height="58" rx="6"/><text class="t" x="34" y="356">⑤ Same index, different term?</text><text class="s" x="34" y="376">truncate my log from there and abort those pending operations</text>
+        <rect class="b-ts" x="20" y="410" width="440" height="46" rx="6"/><text class="t" x="34" y="430">⑥ Append to WAL, prepare, apply up to the commit index</text><text class="s" x="34" y="448">reply with last received op and last committed index</text>
+        <path class="ln" marker-end="url(#d4)" d="M240 78 V96"/><path class="ln" marker-end="url(#d4)" d="M240 156 V174"/><path class="ln" marker-end="url(#d4)" d="M240 234 V252"/><path class="ln" marker-end="url(#d4)" d="M240 312 V330"/><path class="ln" marker-end="url(#d4)" d="M240 390 V408"/>
+
+        <text class="t" x="520" y="34">Example: a deposed leader's tail is replaced</text>
+        <text class="s" x="520" y="54">Follower B was briefly led by an old leader in term 1 that crashed.</text>
+        <text class="s" x="520" y="72">The new leader (term 2) never saw entries 3 and 4.</text>
+        <text class="t" x="520" y="108">New leader</text>
+        <g class="m">
+          <rect class="b-ts" x="520" y="116" width="62" height="34" rx="3"/><text class="m c" x="551" y="138">1.1</text>
+          <rect class="b-ts" x="586" y="116" width="62" height="34" rx="3"/><text class="m c" x="617" y="138">1.2</text>
+          <rect class="b-master" x="652" y="116" width="62" height="34" rx="3"/><text class="m c" x="683" y="138">2.3</text>
+          <rect class="b-master" x="718" y="116" width="62" height="34" rx="3"/><text class="m c" x="749" y="138">2.4</text>
+        </g>
+        <text class="t" x="520" y="188">Follower B, before</text>
+        <g class="m">
+          <rect class="b-ts" x="520" y="196" width="62" height="34" rx="3"/><text class="m c" x="551" y="218">1.1</text>
+          <rect class="b-ts" x="586" y="196" width="62" height="34" rx="3"/><text class="m c" x="617" y="218">1.2</text>
+          <rect class="b-raft" x="652" y="196" width="62" height="34" rx="3"/><text class="m c" x="683" y="218">1.3</text>
+          <rect class="b-raft" x="718" y="196" width="62" height="34" rx="3"/><text class="m c" x="749" y="218">1.4</text>
+        </g>
+        <text class="s" x="520" y="256">Leader sends [2.3, 2.4] with preceding op 1.2.</text>
+        <text class="s" x="520" y="274">B has 1.2, so ④ passes. B has 1.3 where the leader has 2.3: ⑤ fires.</text>
+        <text class="t" x="520" y="308">Follower B, after</text>
+        <g class="m">
+          <rect class="b-ts" x="520" y="316" width="62" height="34" rx="3"/><text class="m c" x="551" y="338">1.1</text>
+          <rect class="b-ts" x="586" y="316" width="62" height="34" rx="3"/><text class="m c" x="617" y="338">1.2</text>
+          <rect class="b-master" x="652" y="316" width="62" height="34" rx="3"/><text class="m c" x="683" y="338">2.3</text>
+          <rect class="b-master" x="718" y="316" width="62" height="34" rx="3"/><text class="m c" x="749" y="338">2.4</text>
+        </g>
+        <text class="s" x="520" y="384">1.3 and 1.4 were never committed, so no client was told</text><text class="s" x="520" y="402">they succeeded. Dropping them is safe. Committed entries</text><text class="s" x="520" y="420">are never dropped: a leader can only win if its log is as</text><text class="s" x="520" y="438">up to date as a majority's (next section).</text>
+      </svg>
+      </div>
+      <figcaption>Truncation also aborts the tablet-layer operations that were pending for the dropped entries, so they never touch the MemRowSet. A follower can therefore always be repaired by the leader, without any manual step.</figcaption>
+    </figure>
+  </section>
+
+  <section id="election">
+    <h2>Electing a new leader</h2>
+    <div class="prose">
+      <p>Every follower runs a failure detector. It expects a message from the leader at least every 500 ms (<code>raft_heartbeat_interval_ms</code>), and gives up after three missed periods, 1.5 seconds. The give-up time is randomized with an exponential backoff after each failed attempt, so two followers rarely start at the same moment. The sequence below assumes the old leader, on server C, has died.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 600" role="img" aria-label="Sequence: replica A times out, runs a pre-election, bumps its term, requests votes, wins with B's vote, becomes leader and replicates a no-op in the new term.">
+        <defs><marker id="d5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-ts" x="100" y="8" width="160" height="36" rx="6"/><text class="t c" x="180" y="31">Replica A</text>
+        <rect class="b-ts" x="410" y="8" width="160" height="36" rx="6"/><text class="t c" x="490" y="31">Replica B</text>
+        <rect class="b-raft" x="720" y="8" width="160" height="36" rx="6" style="fill-opacity:.4"/><text class="t c" x="800" y="31">Replica C (dead)</text>
+        <path class="life" d="M180 44 V590 M490 44 V590 M800 44 V590"/>
+
+        <rect class="b-disk" x="40" y="62" width="280" height="34" rx="5"/><text class="s" x="50" y="83">① no message from the leader for 1.5 s+</text>
+        <path class="ln" marker-end="url(#d5)" d="M180 128 H 488"/><text class="s h" x="190" y="120">② RequestVote, is_pre_election, term 6 (not applied)</text>
+        <path class="ln-d" marker-end="url(#d5)" d="M490 152 H 182"/><text class="s h" x="250" y="146">yes: my leader is silent and your log is not behind</text>
+        <path class="ln" marker-end="url(#d5)" d="M180 190 H 798" style="stroke-opacity:.35"/><text class="s" x="600" y="182" fill="var(--muted)">no reply from C</text>
+
+        <rect class="b-raft" x="40" y="212" width="320" height="50" rx="5"/><text class="s" x="50" y="231">③ majority said yes. Persist term 5 → 6 and vote</text><text class="s" x="50" y="249">for myself (cmeta flushed before asking others)</text>
+        <path class="ln" marker-end="url(#d5)" d="M180 296 H 488"/><text class="s h" x="190" y="288">④ RequestVote, term 6, my last op = 5.412</text>
+        <rect class="b-raft" x="390" y="312" width="360" height="62" rx="5"/><text class="s" x="400" y="331">⑤ B checks the rules: term 6 is newer, B has not</text><text class="s" x="400" y="348">voted in term 6, and 5.412 is at least as new as</text><text class="s" x="400" y="365">B's last op. B persists term 6 and its vote.</text>
+        <path class="ln-d" marker-end="url(#d5)" d="M490 400 H 182"/><text class="s h" x="250" y="392">⑥ vote granted</text>
+        <rect class="b-master" x="40" y="418" width="320" height="34" rx="5"/><text class="s" x="50" y="439">⑦ A + B = 2 of 3 votes: A is leader of term 6</text>
+        <path class="ln" marker-end="url(#d5)" d="M180 484 H 488"/><text class="s h" x="190" y="476">⑧ UpdateConsensus: no-op op 6.413 (first op of term 6)</text>
+        <path class="ln-d" marker-end="url(#d5)" d="M490 508 H 182"/><text class="s h" x="250" y="502">ack</text>
+        <rect class="b-ts" x="40" y="526" width="440" height="52" rx="5"/><text class="s" x="50" y="545">⑨ the no-op is committed in A's own term, so every earlier</text><text class="s" x="50" y="563">operation that B also had is now committed too. A accepts writes.</text>
+      </svg>
+      </div>
+      <figcaption>A must win with a majority of the <em>configured voters</em>, not of the live ones. With three voters, two live replicas are enough. With one live replica out of three, elections fail forever: the tablet is unavailable until a second replica returns or an operator forces a new config with the unsafe-change tooling.</figcaption>
+    </figure>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 360" role="img" aria-label="How a replica answers a vote request: leader alive, busy, stale term, already voted, candidate log too old, otherwise grant.">
+        <defs><marker id="d6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">RequestVote HANDLER: THE FIRST RULE THAT FAILS DECIDES THE ANSWER</text>
+        <g>
+          <rect class="b-master" x="20" y="40" width="300" height="52" rx="6"/><text class="t" x="32" y="62">Heard from a live leader recently?</text><text class="s" x="32" y="80">yes → deny: <tspan class="m">LEADER_IS_ALIVE</tspan></text>
+          <rect class="b-master" x="20" y="108" width="300" height="52" rx="6"/><text class="t" x="32" y="130">Busy handling an update?</text><text class="s" x="32" y="148">yes → deny: <tspan class="m">CONSENSUS_BUSY</tspan></text>
+          <rect class="b-master" x="20" y="176" width="300" height="52" rx="6"/><text class="t" x="32" y="198">Candidate term below mine?</text><text class="s" x="32" y="216">yes → deny: <tspan class="m">INVALID_TERM</tspan></text>
+          <rect class="b-master" x="20" y="244" width="300" height="52" rx="6"/><text class="t" x="32" y="266">Same term, already voted for another?</text><text class="s" x="32" y="284">yes → deny: <tspan class="m">ALREADY_VOTED</tspan></text>
+          <rect class="b-master" x="20" y="312" width="300" height="40" rx="6"/><text class="t" x="32" y="336">Candidate's last op older than mine?</text>
+        </g>
+        <path class="ln" marker-end="url(#d6)" d="M170 92 V106"/><path class="ln" marker-end="url(#d6)" d="M170 160 V174"/><path class="ln" marker-end="url(#d6)" d="M170 228 V242"/><path class="ln" marker-end="url(#d6)" d="M170 296 V310"/>
+        <rect class="b-raft" x="400" y="312" width="260" height="40" rx="6"/><text class="t" x="412" y="336">yes → deny: <tspan class="m">LAST_OPID_TOO_OLD</tspan></text>
+        <path class="ln" marker-end="url(#d6)" d="M320 332 H 398"/>
+        <rect class="b-ts" x="720" y="306" width="240" height="52" rx="6"/><text class="t" x="732" y="328">no → grant the vote</text><text class="s" x="732" y="346">persist term and vote, then reply</text>
+        <path class="ln" marker-end="url(#d6)" d="M660 332 H 718" style="display:none"/>
+        <text class="s" x="400" y="60">Why each rule exists</text>
+        <text class="s" x="400" y="84"><tspan class="t">Live leader:</tspan> a replica that merely lost its link cannot unseat a healthy leader.</text>
+        <text class="s" x="400" y="108"><tspan class="t">Term and one vote per term:</tspan> at most one leader per term.</text>
+        <text class="s" x="400" y="132"><tspan class="t">Log up to date:</tspan> a winner has every committed operation, because</text>
+        <text class="s" x="400" y="150">committed means a majority has it, and any two majorities overlap.</text>
+        <text class="s" x="400" y="184">A voter flushes its new term and vote to disk before replying. Otherwise</text>
+        <text class="s" x="400" y="202">a crash and restart could let it vote twice in the same term.</text>
+        <text class="s" x="400" y="236">Tombstoned or still-copying replicas can vote too, using the last log</text>
+        <text class="s" x="400" y="254">position they remember, so a failed copy never costs the group a vote.</text>
+        <text class="s" x="400" y="288">A request flagged <tspan class="m">ignore_live_leader</tspan> skips the first rule, for forced elections.</text>
+      </svg>
+      </div>
+      <figcaption>Pre-elections use the same handler with <code>is_pre_election</code> set: the answers are computed the same way, but nothing is persisted and the voter's term does not move.</figcaption>
+    </figure>
+  </section>
+
+  <section id="config">
+    <h2>Changing who is in the group</h2>
+    <div class="prose">
+      <p>Servers fail and clusters grow, so the member list of a tablet has to change while it serves traffic. Kudu follows the <em>one-at-a-time</em> approach from Ongaro's thesis: a config change is itself a log entry, the leader allows only one pending at a time, and each change adds or removes a single replica. Changes are conditional (<code>cas_config_opid_index</code>), so two administrators cannot overwrite each other's decision.</p>
+      <p>A replica that is applying a config change uses the new configuration as soon as it has the entry, before commit, and only writes it to its consensus metadata when the entry commits. If the entry is aborted by a new leader, the replica falls back to the committed config.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 540" role="img" aria-label="Five stages of replacing a failed replica with the 3-4-3 scheme: healthy, failure noticed, non-voter added and copied, promoted to voter, failed replica evicted.">
+        <defs><marker id="d7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">REPLACING A FAILED REPLICA WITHOUT EVER DROPPING BELOW A MAJORITY</text>
+        <g>
+          <text class="t" x="20" y="60">① Healthy</text><rect class="b-ts" x="170" y="40" width="110" height="34" rx="4"/><text class="s c" x="225" y="62">A leader · voter</text><rect class="b-ts" x="290" y="40" width="110" height="34" rx="4"/><text class="s c" x="345" y="62">B voter</text><rect class="b-ts" x="410" y="40" width="110" height="34" rx="4"/><text class="s c" x="465" y="62">C voter</text>
+          <text class="s" x="540" y="62">3 voters, majority 2</text>
+
+          <text class="t" x="20" y="122">② C goes silent</text><rect class="b-ts" x="170" y="102" width="110" height="34" rx="4"/><text class="s c" x="225" y="124">A leader</text><rect class="b-ts" x="290" y="102" width="110" height="34" rx="4"/><text class="s c" x="345" y="124">B</text><rect class="b-raft" x="410" y="102" width="110" height="34" rx="4" style="fill-opacity:.4"/><text class="s c" x="465" y="124">C FAILED</text>
+          <text class="s" x="540" y="118">Leader marks C unhealthy; the next tablet report tells the master.</text><text class="s" x="540" y="136">After 5 min of silence C counts as failed (follower_unavailable_considered_failed_sec).</text>
+
+          <text class="t" x="20" y="198">③ Add D as non-voter</text><rect class="b-ts" x="170" y="178" width="110" height="34" rx="4"/><text class="s c" x="225" y="200">A leader</text><rect class="b-ts" x="290" y="178" width="110" height="34" rx="4"/><text class="s c" x="345" y="200">B</text><rect class="b-raft" x="410" y="178" width="110" height="34" rx="4" style="fill-opacity:.4"/><text class="s c" x="465" y="200">C FAILED</text><rect class="b-client" x="530" y="178" width="130" height="34" rx="4"/><text class="s c" x="595" y="200">D non-voter</text>
+          <text class="s" x="680" y="194">Master asks the leader to add D with promote = true.</text><text class="s" x="680" y="212">D copies the tablet (see below). It cannot vote or lead.</text>
+
+          <text class="t" x="20" y="274">④ Promote D</text><rect class="b-ts" x="170" y="254" width="110" height="34" rx="4"/><text class="s c" x="225" y="276">A leader</text><rect class="b-ts" x="290" y="254" width="110" height="34" rx="4"/><text class="s c" x="345" y="276">B</text><rect class="b-raft" x="410" y="254" width="110" height="34" rx="4" style="fill-opacity:.4"/><text class="s c" x="465" y="276">C FAILED</text><rect class="b-ts" x="530" y="254" width="130" height="34" rx="4"/><text class="s c" x="595" y="276">D voter</text>
+          <text class="s" x="680" y="270">Once D has caught up the leader flips it to voter.</text><text class="s" x="680" y="288">Now 4 voters, majority 3: A, B and D are alive.</text>
+
+          <text class="t" x="20" y="350">⑤ Evict C</text><rect class="b-ts" x="170" y="330" width="110" height="34" rx="4"/><text class="s c" x="225" y="352">A leader</text><rect class="b-ts" x="290" y="330" width="110" height="34" rx="4"/><text class="s c" x="345" y="352">B</text><rect class="b-ts" x="410" y="330" width="110" height="34" rx="4"/><text class="s c" x="465" y="352">D voter</text>
+          <text class="s" x="540" y="346">Master asks the leader to remove C.</text><text class="s" x="540" y="364">Back to 3 voters; C's old replica is deleted if it ever returns.</text>
+        </g>
+        <rect class="b-client" x="20" y="400" width="940" height="120" rx="6"/>
+        <text class="t" x="34" y="424">Why not remove C first?</text>
+        <text class="s" x="34" y="446">The older "evict first" scheme went 3 voters → 2 voters (C removed) → 3 voters (D added). During the middle step a second failure leaves no</text>
+        <text class="s" x="34" y="464">majority at all, and the new replica has to be copied while the group is fragile. The 3-4-3 scheme (<tspan class="m">--raft_prepare_replacement_before_eviction</tspan>, default true)</text>
+        <text class="s" x="34" y="482">keeps three healthy voters the whole time. Master and tablet servers must run with the same value; a mismatch is refused at registration.</text>
+        <text class="s" x="34" y="506">Leaders can also be asked to step down, or to hand over to a named voter, which is how the leader rebalancer evens out leadership.</text>
+      </svg>
+      </div>
+      <figcaption>The leader and the master split the work. The leader tracks health and promotes caught-up non-voters by itself. The master reads each leader's report and decides when to add a replacement and when to evict, using <code>ShouldAddReplica</code> and <code>ShouldEvictReplica</code> from <code>consensus/quorum_util.cc</code>.</figcaption>
+    </figure>
+  </section>
+
+  <section id="copy">
+    <h2>Bringing in a new replica: tablet copy</h2>
+    <div class="prose">
+      <p>A brand-new replica has no history, and the leader may have already deleted the old part of its log. So the leader does not replay everything. It tells the new server to <strong>copy</strong> the tablet from it: the data files, the tablet metadata and the WAL segments it still needs. After the copy, the replica is just a slightly lagging follower and catches up with normal <code>UpdateConsensus</code> calls.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 540" role="img" aria-label="Leader peer finds the follower has no tablet and sends StartTabletCopy. The new server's tablet copy client opens a session with the leader's tablet copy service, fetches metadata, data blocks and WAL segments, then ends the session and starts the replica.">
+        <defs><marker id="d8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-ts" x="60" y="8" width="200" height="36" rx="6"/><text class="t c" x="160" y="31">Leader server</text>
+        <rect class="b-client" x="680" y="8" width="220" height="36" rx="6"/><text class="t c" x="790" y="31">New replica's server (D)</text>
+        <path class="life" d="M160 44 V530 M790 44 V530"/>
+
+        <path class="ln" marker-end="url(#d8)" d="M160 82 H 788"/><text class="s h" x="170" y="74">① UpdateConsensus to D</text>
+        <path class="ln-d" marker-end="url(#d8)" d="M790 112 H 162"/><text class="s h" x="400" y="104">TABLET_NOT_FOUND: D has no such tablet yet</text>
+        <path class="ln" marker-end="url(#d8)" d="M160 150 H 788"/><text class="s h" x="170" y="142">② StartTabletCopy(source = leader, term)</text>
+        <rect class="b-client" x="610" y="164" width="330" height="40" rx="5"/><text class="s" x="620" y="182">D creates the replica in state COPYING; a</text><text class="s" x="620" y="198">TabletCopyClient takes over, on its own thread pool</text>
+
+        <path class="ln-d" marker-end="url(#d8)" d="M788 240 H 162"/><text class="s h" x="400" y="232">③ BeginTabletCopySession</text>
+        <rect class="b-ts" x="30" y="252" width="330" height="62" rx="5"/><text class="s" x="40" y="270">The leader's TabletCopyService pins a snapshot:</text><text class="s" x="40" y="287">tablet metadata, the list of data blocks, the WAL</text><text class="s" x="40" y="304">segments, and holds log anchors so they are not GC'd</text>
+        <path class="ln" marker-end="url(#d8)" d="M160 340 H 788"/><text class="s h" x="170" y="332">session id, file lists, block ids, sizes</text>
+
+        <path class="ln-d" marker-end="url(#d8)" d="M788 380 H 162"/><text class="s h" x="300" y="372">④ FetchData, repeated in chunks: data blocks, then WAL segments</text>
+        <path class="ln" marker-end="url(#d8)" d="M160 394 H 788" style="stroke-opacity:.45"/><text class="s" x="330" y="410" fill="var(--muted)">chunks, checksum-verified, optionally rate limited (--tablet_copy_throttler_bytes_per_sec)</text>
+        <rect class="b-client" x="610" y="424" width="330" height="40" rx="5"/><text class="s" x="620" y="442">⑤ write local metadata and consensus config, verify data,</text><text class="s" x="620" y="458">mark the replica READY, bootstrap from the WAL, start</text>
+        <path class="ln-d" marker-end="url(#d8)" d="M788 490 H 162"/><text class="s h" x="400" y="482">⑥ EndTabletCopySession: leader releases its anchors</text>
+        <text class="s" x="170" y="518">Then ordinary UpdateConsensus resumes from D's last op.</text>
+      </svg>
+      </div>
+      <figcaption>The same path repairs an existing replica whose data is corrupt or whose log fell too far behind. In that case the old replica is replaced in place, and its Raft metadata is kept so it cannot vote twice in a term. Copy can be turned off with <code>--enable_tablet_copy=false</code>, an unsafe flag meant for tests.</figcaption>
+    </figure>
+  </section>
+
+  <section id="wal">
+    <h2>The WAL and when it can be deleted</h2>
+    <div class="prose">
+      <p>The WAL is the Raft log. It is a series of fixed-size segment files (8 MB each by default) with an index from op number to position. It serves two jobs: it is the durable log that consensus replicates, and it is the redo log the tablet replays after a crash. A segment can be deleted only when nobody needs it any more.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 380" role="img" aria-label="WAL segments 1 to 7. Segments before the lowest anchor can be deleted. Anchors come from unflushed memory stores, followers that are behind, and active tablet copy sessions.">
+        <text class="s" x="20" y="22">WAL SEGMENTS OF ONE REPLICA, OLDEST ON THE LEFT</text>
+        <g>
+          <rect class="b-disk" x="20" y="40" width="120" height="56" rx="4" style="stroke-dasharray:4 3"/><text class="t c" x="80" y="64">seg 1</text><text class="s c" x="80" y="82">deletable</text>
+          <rect class="b-disk" x="150" y="40" width="120" height="56" rx="4" style="stroke-dasharray:4 3"/><text class="t c" x="210" y="64">seg 2</text><text class="s c" x="210" y="82">deletable</text>
+          <rect class="b-raft" x="280" y="40" width="120" height="56" rx="4"/><text class="t c" x="340" y="64">seg 3</text><text class="s c" x="340" y="82">kept</text>
+          <rect class="b-raft" x="410" y="40" width="120" height="56" rx="4"/><text class="t c" x="470" y="64">seg 4</text><text class="s c" x="470" y="82">kept</text>
+          <rect class="b-raft" x="540" y="40" width="120" height="56" rx="4"/><text class="t c" x="600" y="64">seg 5</text><text class="s c" x="600" y="82">kept</text>
+          <rect class="b-raft" x="670" y="40" width="120" height="56" rx="4"/><text class="t c" x="730" y="64">seg 6</text><text class="s c" x="730" y="82">kept</text>
+          <rect class="b-ts" x="800" y="40" width="160" height="56" rx="4"/><text class="t c" x="880" y="64">seg 7 (active)</text><text class="s c" x="880" y="82">being appended to</text>
+        </g>
+        <path class="ln-r" d="M276 108 V 150"/><text class="t" x="20" y="126" fill="var(--raft)">oldest anchor: index in seg 3</text>
+        <text class="s" x="20" y="144">Everything older than the lowest anchor, and older than what all replicas have, may go.</text>
+
+        <text class="t" x="20" y="198">Who holds anchors</text>
+        <rect class="b-ts" x="20" y="210" width="300" height="90" rx="6"/><text class="t" x="32" y="232">Unflushed data</text><text class="s" x="32" y="252">An operation sitting only in a MemRowSet</text><text class="s" x="32" y="270">or DeltaMemStore must stay in the WAL</text><text class="s" x="32" y="288">until a flush writes it to disk.</text>
+        <rect class="b-client" x="340" y="210" width="300" height="90" rx="6"/><text class="t" x="352" y="232">Lagging followers</text><text class="s" x="352" y="252">The log is kept until every replica has</text><text class="s" x="352" y="270">it (the all-replicated index), but a replica</text><text class="s" x="352" y="288">that is down for good stops holding it.</text>
+        <rect class="b-master" x="660" y="210" width="300" height="90" rx="6"/><text class="t" x="672" y="232">Copy sessions</text><text class="s" x="672" y="252">While a new replica downloads segments,</text><text class="s" x="672" y="270">the leader anchors them so they cannot</text><text class="s" x="672" y="288">disappear mid-copy.</text>
+        <rect class="b-disk" x="20" y="320" width="940" height="46" rx="6"/><text class="s" x="34" y="340">The maintenance manager runs <tspan class="m">LogGCOp</tspan> on each replica. It keeps at least 1 and at most 80 segments by default (<tspan class="m">--log_min_segments_to_retain</tspan>,</text><text class="s" x="34" y="356"><tspan class="m">--log_max_segments_to_retain</tspan>). A replica that falls behind the retained window is rescued by tablet copy, not by log replay.</text>
+      </svg>
+      </div>
+      <figcaption>Durability depends on a flag worth knowing: <code>--log_force_fsync_all</code> is <strong>false</strong> by default. Entries are written to the operating system immediately and the log thread syncs in groups, but each acknowledged write is not individually fsynced. With three replicas on different machines, losing an acknowledged write needs most of them to lose power at once. Turn the flag on if that is not acceptable for your cluster.</figcaption>
+    </figure>
+  </section>
+
+  <section id="ops">
+    <h2>Errors you will see, and the knobs behind them</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Consensus error</th><th>Where</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>INVALID_TERM</code></td><td>UpdateConsensus, RequestVote</td><td>Sender's term is older than the receiver's. The sender steps down.</td></tr>
+          <tr><td><code>PRECEDING_ENTRY_DIDNT_MATCH</code></td><td>UpdateConsensus</td><td>Log matching failed; the leader backs up and resends from an earlier index.</td></tr>
+          <tr><td><code>CANNOT_PREPARE</code></td><td>UpdateConsensus</td><td>Follower could not start any operation of the batch (resource or schema issue).</td></tr>
+          <tr><td><code>LEADER_IS_ALIVE</code></td><td>RequestVote</td><td>Voter still hears a healthy leader and refuses.</td></tr>
+          <tr><td><code>ALREADY_VOTED</code></td><td>RequestVote</td><td>Voter already voted for someone else in this term.</td></tr>
+          <tr><td><code>LAST_OPID_TOO_OLD</code></td><td>RequestVote</td><td>Candidate is missing operations the voter has.</td></tr>
+          <tr><td><code>CONSENSUS_BUSY</code></td><td>RequestVote</td><td>Voter is applying an update; try again shortly.</td></tr>
+          <tr><td><code>NOT_THE_LEADER</code></td><td>client Write</td><td>Not a consensus error. The client refreshes its cached leader and retries.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Flag</th><th>Default</th><th>What it controls</th></tr></thead>
+        <tbody>
+          <tr><td><code>--raft_heartbeat_interval_ms</code></td><td>500</td><td>Leader heartbeat period when idle</td></tr>
+          <tr><td><code>--leader_failure_max_missed_heartbeat_periods</code></td><td>3.0</td><td>Missed periods before a follower calls an election (1.5 s total)</td></tr>
+          <tr><td><code>--leader_failure_exp_backoff_max_delta_ms</code></td><td>20000</td><td>Cap on extra delay between failed elections</td></tr>
+          <tr><td><code>--raft_enable_pre_election</code></td><td>true</td><td>Ask for hypothetical votes before bumping the term</td></tr>
+          <tr><td><code>--follower_unavailable_considered_failed_sec</code></td><td>300</td><td>Silence after which a follower counts as failed</td></tr>
+          <tr><td><code>--evict_failed_followers</code></td><td>true</td><td>Allow removing failed or hopelessly lagging followers</td></tr>
+          <tr><td><code>--raft_prepare_replacement_before_eviction</code></td><td>true</td><td>Use the 3-4-3 replacement scheme</td></tr>
+          <tr><td><code>--consensus_max_batch_size_bytes</code></td><td>1 MiB</td><td>Upper bound of one UpdateConsensus payload</td></tr>
+          <tr><td><code>--consensus_rpc_timeout_ms</code></td><td>30000</td><td>Timeout for consensus RPCs</td></tr>
+          <tr><td><code>--log_segment_size_mb</code></td><td>8</td><td>WAL segment size</td></tr>
+          <tr><td><code>--log_force_fsync_all</code></td><td>false</td><td>fsync after every WAL write</td></tr>
+          <tr><td><code>--enable_leader_failure_detection</code></td><td>true</td><td>Unsafe to disable outside tests</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Practical rule: if a tablet is unavailable, ask first "do a majority of its voters respond?". The <code>kudu cluster ksck</code> and <code>kudu tablet</code> tools show each replica's role, term and last operation, and the tablet server web UI has a per-tablet consensus status page.</p>
+  </section>
+
+  <section id="map">
+    <h2>Where to find it in the source</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>File (in <code>src/kudu/consensus/</code>)</th><th>What to look for</th></tr></thead>
+        <tbody>
+          <tr><td><code>raft_consensus.cc</code></td><td><code>Replicate</code>, <code>Update</code>, <code>RequestVote</code>, <code>StartElection</code>, <code>BecomeLeaderUnlocked</code>, <code>ChangeConfig</code></td></tr>
+          <tr><td><code>consensus_queue.cc</code></td><td>Per-follower state, watermarks and the commit rule (<code>first_index_in_current_term</code>)</td></tr>
+          <tr><td><code>consensus_peers.cc</code> · <code>peer_manager.cc</code></td><td>The RPC loop to each follower; triggers tablet copy</td></tr>
+          <tr><td><code>leader_election.cc</code></td><td>Collects votes and decides the outcome of one election</td></tr>
+          <tr><td><code>pending_rounds.cc</code></td><td>Rounds waiting for commit, truncation of divergent tails</td></tr>
+          <tr><td><code>consensus_meta.cc</code></td><td>Term, vote, committed and pending config on disk</td></tr>
+          <tr><td><code>log.cc</code> · <code>log_cache.cc</code> · <code>log_anchor_registry.cc</code></td><td>The WAL, its in-memory cache, and anchors for GC</td></tr>
+          <tr><td><code>quorum_util.cc</code></td><td>Majority math and the add or evict decision</td></tr>
+          <tr><td><code>consensus.proto</code> · <code>metadata.proto</code></td><td>Messages, roles, member types, health reports</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>On the tablet server side, tablet copy lives in <code>tserver/tablet_copy_client.cc</code>, <code>tablet_copy_service.cc</code> and <code>tablet_copy_source_session.cc</code>. Design notes are in <code>docs/design-docs/raft-config-change.md</code> and <code>raft-tablet-copy.md</code>. <code>src/kudu/consensus/consensus.txt</code> still says membership changes are unimplemented, which is out of date; the code supports them, and uses <code>NON_VOTER</code> where older docs say <code>PRE_FOLLOWER</code>.</p>
+      <p><strong>Next part:</strong> a line-by-line trace of one <code>WriteOp</code> from the RPC handler to the MemRowSet, tying together Parts 1 to 4.</p>
+    </div>
+  </section>
+</main>
