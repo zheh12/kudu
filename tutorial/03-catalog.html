@@ -1,0 +1,514 @@
+<title>Kudu Catalog Tutorial</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column; wide figures scroll inside their own frame on phones.
+   Palette is keyed to the roles in the system: client (ochre), master (indigo), tablet server (teal), Raft/WAL (rust), disk (slate). */
+:root {
+  --bg: #f4f7f8; --surf: #ffffff; --fg: #14212b; --muted: #55646e; --line: #d0d9df; --line2: #8fa0ab;
+  --client: #a9680f; --client-t: #fbeed6;
+  --master: #4a4db8; --master-t: #e6e7fa;
+  --ts: #0d7566; --ts-t: #d9f1ed;
+  --raft: #bb4a22; --raft-t: #fae3d9;
+  --disk: #52646f; --disk-t: #e6ecef;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+    --client: #e3ad50; --client-t: #3a2f17;
+    --master: #a1a3f5; --master-t: #25284d;
+    --ts: #4fc9b4; --ts-t: #11322d;
+    --raft: #f2905f; --raft-t: #3d2218;
+    --disk: #a3b4bf; --disk-t: #22323c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+  --client: #e3ad50; --client-t: #3a2f17;
+  --master: #a1a3f5; --master-t: #25284d;
+  --ts: #4fc9b4; --ts-t: #11322d;
+  --raft: #f2905f; --raft-t: #3d2218;
+  --disk: #a3b4bf; --disk-t: #22323c;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.65 var(--body);
+  padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.prose { max-width: 68ch; display: flex; flex-direction: column; gap: 12px; }
+p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.1rem; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+code { font: 500 .88em var(--mono); background: var(--disk-t); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--master); }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { background: var(--surf); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { font-size: .92rem; color: var(--muted); max-width: 78ch; }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.role { background: var(--surf); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role h3 { color: var(--c); }
+.role p, .role li { font-size: .95rem; }
+.role ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; max-width: 76ch; }
+.note { border-left: 3px solid var(--raft); padding: 4px 0 4px 14px; color: var(--muted); max-width: 68ch; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font: 500 13px var(--mono); text-decoration: none; color: var(--fg); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+/* SVG vocabulary */
+svg text { font-family: var(--body); fill: var(--fg); font-size: 13px; }
+svg .t { font-weight: 600; }
+svg .s { font-size: 11.5px; fill: var(--muted); }
+svg .m { font-family: var(--mono); font-size: 11.5px; }
+svg .h { paint-order: stroke; stroke: var(--surf); stroke-width: 5px; stroke-linejoin: round; }
+svg .c { text-anchor: middle; }
+svg .e { text-anchor: end; }
+svg .box { fill: var(--surf); stroke: var(--line2); stroke-width: 1.4; }
+svg .grp { fill: none; stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .b-client { fill: var(--client-t); stroke: var(--client); stroke-width: 1.5; }
+svg .b-master { fill: var(--master-t); stroke: var(--master); stroke-width: 1.5; }
+svg .b-ts { fill: var(--ts-t); stroke: var(--ts); stroke-width: 1.5; }
+svg .b-raft { fill: var(--raft-t); stroke: var(--raft); stroke-width: 1.5; }
+svg .b-disk { fill: var(--disk-t); stroke: var(--disk); stroke-width: 1.5; }
+svg .solid-ts { fill: var(--ts); stroke: var(--ts); }
+svg .solid-ts + text, svg text.on { fill: var(--surf); }
+svg .ln { fill: none; stroke: currentColor; stroke-width: 1.5; }
+svg .ln-r { fill: none; stroke: var(--raft); stroke-width: 1.6; stroke-dasharray: 6 4; }
+svg .ln-d { fill: none; stroke: var(--line2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+svg .life { stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 3 5; }
+</style>
+
+<main>
+  <header class="prose">
+    <span class="eyebrow">Learning Kudu · Part 3</span>
+    <h1>The catalog and table creation</h1>
+    <p class="lede">The master is the cluster's memory. It knows every table, every tablet, and which tablet server holds which replica. This part opens up the <code>CatalogManager</code>, follows a <code>CreateTable</code> call from the client to a running tablet, and shows how the master recovers after a failover.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#inside">Inside a master</a><a href="#objects">Tables and tablets</a><a href="#states">States</a><a href="#create">CreateTable</a><a href="#partitions">Partitions</a><a href="#assign">Assignment</a><a href="#placement">Placement</a><a href="#heartbeat">Heartbeats</a><a href="#lookup">Lookups</a><a href="#alter">Alter &amp; delete</a><a href="#failover">Failover</a><a href="#map">Source map</a>
+    </nav>
+  </header>
+
+  <section id="inside">
+    <h2>Inside a master</h2>
+    <div class="prose">
+      <p>A master is a small server built on the same RPC stack as Part 2. Its job is bookkeeping, so it is not on the path of any read or write. Only the <strong>leader</strong> master serves catalog requests. The others keep a copy of the data and wait to take over.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 560" role="img" aria-label="Layers of a master: RPC service, leader lock, CatalogManager with in-memory maps and async tasks, SysCatalogTable replicated by Raft across masters, plus TSManager and background tasks on the side.">
+        <defs><marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="grp" x="10" y="8" width="650" height="544" rx="10"/><text class="s" x="24" y="28">one master process</text>
+        <rect class="b-client" x="30" y="42" width="610" height="62" rx="6"/><text class="t" x="46" y="66">MasterServiceImpl</text><text class="s" x="46" y="86">CreateTable · AlterTable · DeleteTable · GetTableLocations · TSHeartbeat · ConnectToMaster</text>
+        <rect class="b-master" x="30" y="124" width="610" height="46" rx="6"/><text class="t" x="46" y="145">ScopedLeaderSharedLock</text><text class="s" x="46" y="161">every handler takes it first; a follower answers "not the leader" so the client tries another master</text>
+        <path class="ln" marker-end="url(#c1)" d="M335 104 V122"/><path class="ln" marker-end="url(#c1)" d="M335 170 V196"/>
+
+        <rect class="grp" x="30" y="198" width="610" height="214" rx="8"/><text class="t" x="46" y="220">CatalogManager</text>
+        <rect class="b-ts" x="46" y="232" width="188" height="164" rx="6"/><text class="t" x="58" y="254">In-memory maps</text><text class="m" x="58" y="278">table_ids_map_</text><text class="s" x="58" y="294">table id → TableInfo</text><text class="m" x="58" y="318">normalized_table_</text><text class="m" x="58" y="334">names_map_</text><text class="s" x="58" y="350">name → TableInfo</text><text class="m" x="58" y="374">tablet_map_</text><text class="s" x="58" y="390">tablet id → TabletInfo</text>
+        <rect class="b-ts" x="246" y="232" width="188" height="164" rx="6"/><text class="t" x="258" y="254">TableInfo, TabletInfo</text><text class="s" x="258" y="274">copy-on-write objects.</text><text class="s" x="258" y="292">Readers see the committed</text><text class="s" x="258" y="310">copy; a writer edits a dirty</text><text class="s" x="258" y="328">copy, persists it, then</text><text class="s" x="258" y="346">commits it.</text>
+        <rect class="b-raft" x="446" y="232" width="178" height="164" rx="6"/><text class="t" x="458" y="254">Async RPC tasks</text><text class="m" x="458" y="278">AsyncCreateReplica</text><text class="m" x="458" y="298">AsyncAlterTable</text><text class="m" x="458" y="318">AsyncDeleteReplica</text><text class="m" x="458" y="338">AsyncChangeConfig</text><text class="s" x="458" y="362">retry until the tablet</text><text class="s" x="458" y="378">server answers</text>
+        <path class="ln" marker-end="url(#c1)" d="M335 412 V438"/>
+        <rect class="b-disk" x="30" y="440" width="610" height="62" rx="6"/><text class="t" x="46" y="464">SysCatalogTable (<tspan class="m">sys.catalog</tspan>)</text><text class="s" x="46" y="484">a one-tablet Kudu table, stored with the same tablet code as user data</text>
+        <rect class="b-raft" x="30" y="512" width="610" height="30" rx="6"/><text class="s c" x="335" y="532">its Raft group spans all masters, so every write needs a majority of masters</text>
+
+        <text class="s" x="700" y="28">ALSO IN THE MASTER</text>
+        <rect class="b-ts" x="700" y="42" width="270" height="92" rx="6"/><text class="t" x="714" y="66">TSManager</text><text class="s" x="714" y="86">one TSDescriptor per tablet server:</text><text class="s" x="714" y="104">address, last heartbeat, replica counts.</text><text class="s" x="714" y="122">Built from heartbeats, never persisted.</text>
+        <rect class="b-master" x="700" y="150" width="270" height="92" rx="6"/><text class="t" x="714" y="174">CatalogManagerBgTasks</text><text class="s" x="714" y="194">a thread that wakes every second,</text><text class="s" x="714" y="212">or when CreateTable pokes it, to</text><text class="s" x="714" y="230">assign pending tablets (see below).</text>
+        <rect class="b-client" x="700" y="258" width="270" height="76" rx="6"/><text class="t" x="714" y="282">PlacementPolicy</text><text class="s" x="714" y="302">picks which tablet servers get the</text><text class="s" x="714" y="320">replicas of a new tablet.</text>
+        <rect class="b-disk" x="700" y="350" width="270" height="76" rx="6"/><text class="t" x="714" y="374">Authorization</text><text class="s" x="714" y="394">default ACLs, or Ranger policies for</text><text class="s" x="714" y="412">table and column access.</text>
+        <rect class="b-disk" x="700" y="442" width="270" height="100" rx="6"/><text class="t" x="714" y="466">Security and integrations</text><text class="s" x="714" y="486">internal CA and token signing keys,</text><text class="s" x="714" y="504">Hive Metastore sync, auto rebalancer</text><text class="s" x="714" y="522">and leader rebalancer.</text>
+      </svg>
+      </div>
+      <figcaption>The master keeps the whole catalog in memory and treats <code>sys.catalog</code> as its write-ahead copy. That is why metadata lookups are cheap, and also why a cluster with millions of tablets needs a master with enough RAM.</figcaption>
+    </figure>
+  </section>
+
+  <section id="objects">
+    <h2>What the catalog stores</h2>
+    <div class="prose">
+      <p>Two kinds of objects matter. A <code>TableInfo</code> holds the schema, partitioning rules and replication factor. A <code>TabletInfo</code> holds one tablet's key range, its state, and the latest Raft configuration the master has heard about, including who the leader is. Each is saved as a row in <code>sys.catalog</code>, whose schema is just three columns.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 440" role="img" aria-label="In-memory TableInfo and TabletInfo objects are persisted as rows in the sys.catalog table, keyed by entry type and id.">
+        <defs><marker id="c2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">IN MEMORY</text><text class="s" x="560" y="22">ON DISK: THE sys.catalog TABLET</text>
+        <rect class="b-ts" x="20" y="36" width="330" height="150" rx="6"/><text class="t" x="34" y="60">TableInfo "metrics"</text>
+        <text class="m" x="34" y="84">id: 7f3a…</text><text class="m" x="34" y="102">schema, partition_schema</text><text class="m" x="34" y="120">num_replicas: 3</text><text class="m" x="34" y="138">state: RUNNING</text><text class="m" x="34" y="156">schema_version: 4</text><text class="s" x="34" y="176">tablets keyed by partition start key →</text>
+        <g>
+          <rect class="b-master" x="20" y="214" width="330" height="62" rx="6"/><text class="t" x="34" y="236">TabletInfo 9c1e…</text><text class="s" x="34" y="254">partition [bucket 0) · state RUNNING</text><text class="s" x="34" y="270">leader TS-2, voters TS-1 TS-2 TS-4, term 3</text>
+          <rect class="b-master" x="20" y="290" width="330" height="62" rx="6"/><text class="t" x="34" y="312">TabletInfo 4b27…</text><text class="s" x="34" y="330">partition [bucket 1) · state RUNNING</text><text class="s" x="34" y="346">leader TS-3, voters TS-2 TS-3 TS-4, term 5</text>
+          <rect class="b-master" x="20" y="366" width="330" height="62" rx="6"/><text class="t" x="34" y="388">TabletInfo e802…</text><text class="s" x="34" y="406">partition [bucket 2) · state CREATING</text><text class="s" x="34" y="422">voters TS-1 TS-3 TS-4, no leader yet</text>
+        </g>
+        <path class="ln" marker-end="url(#c2)" d="M350 112 H 556"/><text class="s h" x="400" y="104">persisted as</text>
+        <path class="ln" marker-end="url(#c2)" d="M350 245 C 450 245, 480 190, 556 190"/>
+        <path class="ln" marker-end="url(#c2)" d="M350 321 C 450 321, 480 232, 556 232"/>
+        <path class="ln" marker-end="url(#c2)" d="M350 397 C 450 397, 480 274, 556 274"/>
+
+        <rect class="box" x="560" y="36" width="400" height="30" rx="4"/>
+        <text class="t" x="574" y="56">entry_type</text><text class="t" x="680" y="56">entry_id</text><text class="t" x="790" y="56">metadata</text>
+        <rect class="b-ts" x="560" y="76" width="400" height="42" rx="4"/><text class="m" x="574" y="102">1 TABLES</text><text class="m" x="680" y="102">7f3a…</text><text class="s" x="790" y="102">SysTablesEntryPB</text>
+        <rect class="b-master" x="560" y="170" width="400" height="30" rx="4"/><text class="m" x="574" y="190">2 TABLETS</text><text class="m" x="680" y="190">9c1e…</text><text class="s" x="790" y="190">SysTabletsEntryPB</text>
+        <rect class="b-master" x="560" y="212" width="400" height="30" rx="4"/><text class="m" x="574" y="232">2 TABLETS</text><text class="m" x="680" y="232">4b27…</text><text class="s" x="790" y="232">SysTabletsEntryPB</text>
+        <rect class="b-master" x="560" y="254" width="400" height="30" rx="4"/><text class="m" x="574" y="274">2 TABLETS</text><text class="m" x="680" y="274">e802…</text><text class="s" x="790" y="274">SysTabletsEntryPB</text>
+        <rect class="b-disk" x="560" y="298" width="400" height="26" rx="4"/><text class="m" x="574" y="316">3 CERT_AUTHORITY_INFO</text><text class="s" x="790" y="316">root CA cert and key</text>
+        <rect class="b-disk" x="560" y="330" width="400" height="26" rx="4"/><text class="m" x="574" y="348">4 TSK_ENTRY</text><text class="s" x="790" y="348">token signing keys</text>
+        <rect class="b-disk" x="560" y="362" width="400" height="26" rx="4"/><text class="m" x="574" y="380">7 CLUSTER_ID</text><text class="s" x="790" y="380">unique cluster id</text>
+        <text class="s" x="560" y="414">Primary key is (entry_type, entry_id); the value is a serialized protobuf.</text>
+        <text class="s" x="560" y="432">Also here: HMS notification log position and tablet server state.</text>
+      </svg>
+      </div>
+      <figcaption>The master's whole durable state is these rows. Tablet servers hold the replicas' data; the master only remembers where they are. The leader and term shown in a <code>TabletInfo</code> are a cache, refreshed from tablet servers' reports, not something the master decides.</figcaption>
+    </figure>
+  </section>
+
+  <section id="states">
+    <h2>Tablet and table states</h2>
+    <div class="prose">
+      <p>Both objects move through small state machines. Every transition is written to <code>sys.catalog</code> before it becomes visible in memory. The state names below are the enums in <code>master.proto</code>.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 360" role="img" aria-label="Tablet states: PREPARING to CREATING to RUNNING, CREATING to REPLACED on timeout, to DELETED. Table states: RUNNING to ALTERING and back, RUNNING to REMOVED.">
+        <defs><marker id="c3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="t" x="20" y="24">Tablet</text>
+        <rect class="b-disk" x="20" y="50" width="150" height="48" rx="6"/><text class="t c" x="95" y="80">PREPARING</text>
+        <rect class="b-raft" x="270" y="50" width="150" height="48" rx="6"/><text class="t c" x="345" y="80">CREATING</text>
+        <rect class="b-ts" x="520" y="50" width="150" height="48" rx="6"/><text class="t c" x="595" y="80">RUNNING</text>
+        <rect class="b-disk" x="770" y="50" width="150" height="48" rx="6"/><text class="t c" x="845" y="80">DELETED</text>
+        <rect class="b-disk" x="270" y="140" width="150" height="48" rx="6"/><text class="t c" x="345" y="170">REPLACED</text>
+        <path class="ln" marker-end="url(#c3)" d="M170 74 H 268"/><text class="s c" x="219" y="42">bg task picks it up</text>
+        <path class="ln" marker-end="url(#c3)" d="M420 74 H 518"/><text class="s c" x="469" y="42">reported with a leader</text>
+        <path class="ln" marker-end="url(#c3)" d="M670 74 H 768"/><text class="s c" x="719" y="42">table dropped</text>
+        <path class="ln-r" marker-end="url(#c3)" d="M345 98 V 138"/><text class="s" x="356" y="124">not created in 30 s</text>
+        <text class="s" x="440" y="168">A new tablet with a new id takes its place and goes to CREATING.</text>
+
+        <text class="t" x="20" y="232">Table</text>
+        <rect class="b-ts" x="270" y="250" width="150" height="48" rx="6"/><text class="t c" x="345" y="280">RUNNING</text>
+        <rect class="b-client" x="520" y="250" width="150" height="48" rx="6"/><text class="t c" x="595" y="280">ALTERING</text>
+        <rect class="b-disk" x="770" y="250" width="150" height="48" rx="6"/><text class="t c" x="845" y="280">REMOVED</text>
+        <path class="ln" marker-end="url(#c3)" d="M420 264 H 518"/><text class="s c" x="469" y="244">AlterTable</text>
+        <path class="ln" marker-end="url(#c3)" d="M520 288 H 422"/><text class="s c" x="469" y="316">all tablets on new schema</text>
+        <path class="ln" marker-end="url(#c3)" d="M345 298 C 345 356, 845 356, 845 300"/><text class="s c" x="650" y="334">DeleteTable</text>
+        <text class="s" x="20" y="262">A new table is built as</text><text class="s" x="20" y="280">PREPARING in memory and is</text><text class="s" x="20" y="298">saved already as RUNNING.</text>
+      </svg>
+      </div>
+      <figcaption>The table state ALTERING is what makes <code>IsAlterTableDone</code> answer "not yet". There is also a <code>SOFT_DELETED</code> state for recallable drops. Deleted tables and tablets stay in memory for a while (an hour by default) when metadata cleanup is on.</figcaption>
+    </figure>
+  </section>
+
+  <section id="create">
+    <h2>CreateTable, step by step</h2>
+    <div class="prose">
+      <p>Creating a table is two separate jobs. The first runs inside the RPC and ends with the table recorded in <code>sys.catalog</code>. The second runs in the background and actually creates tablet replicas on tablet servers. This is worth knowing: the call can return before any tablet exists.</p>
+      <p>Part 1's design doc describes the table and tablets being written in two phases. The current code writes them together in <em>one</em> <code>sys.catalog</code> write, and the tablets start in <code>PREPARING</code>.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 470" role="img" aria-label="Seven synchronous steps of CreateTable on the master leader, ending with one sys.catalog write and an in-memory commit.">
+        <defs><marker id="c4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">INSIDE THE CreateTable RPC (CatalogManager::CreateTableHelper)</text>
+        <g>
+          <rect class="b-master" x="20" y="40" width="120" height="96" rx="6"/><text class="t" x="32" y="62">① Validate</text><text class="s" x="32" y="82">schema and column</text><text class="s" x="32" y="98">defaults, partition</text><text class="s" x="32" y="114">schema, replica</text><text class="s" x="32" y="130">count</text>
+          <rect class="b-master" x="150" y="40" width="120" height="96" rx="6"/><text class="t" x="162" y="62">② Partitions</text><text class="s" x="162" y="82">expand hash and</text><text class="s" x="162" y="98">range rules into the</text><text class="s" x="162" y="114">list of tablet key</text><text class="s" x="162" y="130">ranges</text>
+          <rect class="b-master" x="280" y="40" width="120" height="96" rx="6"/><text class="t" x="292" y="62">③ Reserve name</text><text class="s" x="292" y="82">under the lock: fail</text><text class="s" x="292" y="98">if the name exists,</text><text class="s" x="292" y="114">or is being made by</text><text class="s" x="292" y="130">another call</text>
+          <rect class="b-ts" x="410" y="40" width="120" height="96" rx="6"/><text class="t" x="422" y="62">④ Build objects</text><text class="s" x="422" y="82">TableInfo (dirty,</text><text class="s" x="422" y="98">RUNNING), a</text><text class="s" x="422" y="114">TabletInfo per part-</text><text class="s" x="422" y="130">ition, PREPARING</text>
+          <rect class="b-disk" x="540" y="40" width="120" height="96" rx="6"/><text class="t" x="552" y="62">⑤ Hive (opt.)</text><text class="s" x="552" y="82">create the entry in</text><text class="s" x="552" y="98">the Hive Metastore;</text><text class="s" x="552" y="114">undone if a later</text><text class="s" x="552" y="130">step fails</text>
+          <rect class="b-raft" x="670" y="40" width="130" height="96" rx="6"/><text class="t" x="682" y="62">⑥ Write once</text><text class="s" x="682" y="82">one sys.catalog</text><text class="s" x="682" y="98">write with the table</text><text class="s" x="682" y="114">and all tablets; Raft</text><text class="s" x="682" y="130">majority of masters</text>
+          <rect class="b-ts" x="810" y="40" width="150" height="96" rx="6"/><text class="t" x="822" y="62">⑦ Commit</text><text class="s" x="822" y="82">make objects visible,</text><text class="s" x="822" y="98">add to the three maps,</text><text class="s" x="822" y="114">wake the bg thread,</text><text class="s" x="822" y="130">reply with table_id</text>
+        </g>
+        <path class="ln" marker-end="url(#c4)" d="M140 88 H 148"/><path class="ln" marker-end="url(#c4)" d="M270 88 H 278"/><path class="ln" marker-end="url(#c4)" d="M400 88 H 408"/><path class="ln" marker-end="url(#c4)" d="M530 88 H 538"/><path class="ln" marker-end="url(#c4)" d="M660 88 H 668"/><path class="ln" marker-end="url(#c4)" d="M800 88 H 808"/>
+
+        <rect class="grp" x="20" y="170" width="940" height="130" rx="8"/>
+        <text class="t" x="36" y="196">If any step fails</text>
+        <text class="s" x="36" y="220">The name reservation is released, the dirty copies are thrown away, and the Hive entry is dropped.</text>
+        <text class="s" x="36" y="240">Nothing reached the maps or the other masters, so the call leaves no trace. A client retry starts clean.</text>
+        <text class="s" x="36" y="268">If this master stops being leader mid-call, the write fails and the client is told to find the new leader.</text>
+
+        <rect class="b-client" x="20" y="334" width="940" height="110" rx="8"/>
+        <text class="t" x="36" y="360">When CreateTable returns, the table exists but its tablets might not</text>
+        <text class="s" x="36" y="384">No tablet server has heard about it yet. Clients therefore poll <tspan class="m">IsCreateTableDone</tspan> until every tablet is running.</text>
+        <text class="s" x="36" y="404">The master checks one more limit on the way: <tspan class="m">--max_create_tablets_per_ts</tspan> (60 by default) caps how many replicas one tablet server</text>
+        <text class="s" x="36" y="424">may be asked to host for a single new table.</text>
+      </svg>
+      </div>
+      <figcaption>Order matters: persist first, then commit in memory. If the master crashed between ⑥ and ⑦, the next leader would load the table from <code>sys.catalog</code>. If it crashed before ⑥, the table never existed.</figcaption>
+    </figure>
+  </section>
+
+  <section id="partitions">
+    <h2>How a table becomes tablets</h2>
+    <div class="prose">
+      <p>Step ② decides how many tablets there will be. Hash partitioning spreads writes across buckets. Range partitioning keeps neighbouring keys together and lets you add or drop ranges later. When a table uses both, the tablets are the product: every hash bucket in every range.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 330" role="img" aria-label="A grid of 3 hash buckets by 2 time ranges gives 6 tablets.">
+        <text class="s" x="20" y="22">EXAMPLE TABLE</text>
+        <text class="m" x="20" y="44">PRIMARY KEY (host, time)</text>
+        <text class="m" x="20" y="64">HASH (host) PARTITIONS 3</text>
+        <text class="m" x="20" y="84">RANGE (time): [Jan, Jul) and [Jul, Jan next year)</text>
+        <text class="t c" x="560" y="120">range of time</text>
+        <rect class="b-master" x="380" y="130" width="250" height="34" rx="4"/><text class="t c" x="505" y="152">[ Jan, Jul )</text>
+        <rect class="b-master" x="640" y="130" width="250" height="34" rx="4"/><text class="t c" x="765" y="152">[ Jul, Jan )</text>
+        <text class="t" x="20" y="214">hash bucket of host</text>
+        <rect class="b-client" x="220" y="174" width="150" height="44" rx="4"/><text class="t c" x="295" y="201">bucket 0</text>
+        <rect class="b-client" x="220" y="224" width="150" height="44" rx="4"/><text class="t c" x="295" y="251">bucket 1</text>
+        <rect class="b-client" x="220" y="274" width="150" height="44" rx="4"/><text class="t c" x="295" y="301">bucket 2</text>
+        <g>
+          <rect class="b-ts" x="380" y="174" width="250" height="44" rx="4"/><text class="t c" x="505" y="201">tablet T0</text>
+          <rect class="b-ts" x="640" y="174" width="250" height="44" rx="4"/><text class="t c" x="765" y="201">tablet T3</text>
+          <rect class="b-ts" x="380" y="224" width="250" height="44" rx="4"/><text class="t c" x="505" y="251">tablet T1</text>
+          <rect class="b-ts" x="640" y="224" width="250" height="44" rx="4"/><text class="t c" x="765" y="251">tablet T4</text>
+          <rect class="b-ts" x="380" y="274" width="250" height="44" rx="4"/><text class="t c" x="505" y="301">tablet T2</text>
+          <rect class="b-ts" x="640" y="274" width="250" height="44" rx="4"/><text class="t c" x="765" y="301">tablet T5</text>
+        </g>
+        <text class="s" x="20" y="120">Each cell is one tablet,</text><text class="s" x="20" y="138">three replicas each:</text><text class="s" x="20" y="156">18 replicas in total.</text>
+      </svg>
+      </div>
+      <figcaption>A row lands in exactly one cell: hash its <code>host</code> to pick the row of the grid, compare its <code>time</code> to pick the column. Adding a range later (<code>AlterTable</code>) adds a new column of three tablets without touching existing ones. Replicas multiply tablet count by the replication factor, so check the total against what your tablet servers can hold.</figcaption>
+    </figure>
+  </section>
+
+  <section id="assign">
+    <h2>Creating the replicas</h2>
+    <div class="prose">
+      <p>Now the background thread takes over. Once a second (or immediately when woken by <code>CreateTable</code>) it collects every tablet that is neither running nor deleted and calls <code>ProcessPendingAssignments</code>. Here is what happens to one new tablet, from the master's first look to the moment clients can use it.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 640" role="img" aria-label="Sequence from the master background thread selecting replicas, writing sys.catalog, sending CreateTablet to three tablet servers, the replicas electing a leader, and the master marking the tablet running after a report with a leader.">
+        <defs><marker id="c5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-master" x="20" y="8" width="150" height="36" rx="6"/><text class="t c" x="95" y="31">Master leader</text>
+        <rect class="b-raft" x="260" y="8" width="130" height="36" rx="6"/><text class="t c" x="325" y="31">sys.catalog</text>
+        <rect class="b-ts" x="520" y="8" width="120" height="36" rx="6"/><text class="t c" x="580" y="31">Tablet server A</text>
+        <rect class="b-ts" x="690" y="8" width="120" height="36" rx="6"/><text class="t c" x="750" y="31">Server B</text>
+        <rect class="b-ts" x="850" y="8" width="110" height="36" rx="6"/><text class="t c" x="905" y="31">Server C</text>
+        <path class="life" d="M95 44 V630 M325 44 V630 M580 44 V630 M750 44 V630 M905 44 V630"/>
+
+        <rect class="b-master" x="30" y="60" width="310" height="62" rx="5"/><text class="s" x="40" y="78">① bg thread: tablet is PREPARING. Mark it CREATING</text><text class="s" x="40" y="95">(dirty copy). Ask PlacementPolicy for 3 servers and</text><text class="s" x="40" y="112">write them into the tablet's Raft config at term 0.</text>
+        <path class="ln" marker-end="url(#c5)" d="M95 150 H 323"/><text class="s h" x="110" y="142">② write the updated tablet rows</text>
+        <path class="ln-d" marker-end="url(#c5)" d="M325 176 H 97"/><text class="s h" x="150" y="168">replicated to a majority of masters, then ack</text>
+        <text class="s" x="110" y="204">③ commit in memory</text>
+
+        <path class="ln" marker-end="url(#c5)" d="M95 236 H 578"/><path class="ln" marker-end="url(#c5)" d="M95 250 H 748"/><path class="ln" marker-end="url(#c5)" d="M95 264 H 903"/>
+        <text class="s h" x="360" y="228">④ CreateTablet(config, schema, partition) to each replica</text>
+
+        <rect class="b-ts" x="450" y="286" width="200" height="62" rx="5"/><text class="s" x="460" y="304">⑤ create tablet metadata and</text><text class="s" x="460" y="321">consensus metadata on disk,</text><text class="s" x="460" y="338">open the replica</text>
+        <rect class="b-ts" x="690" y="286" width="120" height="62" rx="5"/><text class="s c" x="750" y="322">⑤ same</text>
+        <rect class="b-ts" x="850" y="286" width="110" height="62" rx="5"/><text class="s c" x="905" y="322">⑤ same</text>
+
+        <path class="ln-r" marker-start="url(#c5)" marker-end="url(#c5)" d="M582 386 H 748"/><path class="ln-r" marker-start="url(#c5)" marker-end="url(#c5)" d="M752 402 H 903"/>
+        <text class="s h" x="600" y="378" fill="var(--raft)">⑥ no leader yet: replicas run a Raft election</text>
+
+        <path class="ln" marker-end="url(#c5)" d="M750 450 H 97"/><text class="s h" x="300" y="442">⑦ heartbeat with tablet report: replica state plus Raft leader and term</text>
+        <rect class="b-master" x="30" y="468" width="340" height="62" rx="5"/><text class="s" x="40" y="486">⑧ A leader is known, so mark the tablet RUNNING.</text><text class="s" x="40" y="503">(Waiting for a leader avoids calling a tablet created</text><text class="s" x="40" y="520">when only a minority of replicas came up.)</text>
+        <path class="ln" marker-end="url(#c5)" d="M95 556 H 323"/><text class="s h" x="110" y="548">⑨ write the RUNNING state</text>
+        <text class="s" x="110" y="590">⑩ GetTableLocations now returns this tablet and its leader</text>
+        <text class="s" x="520" y="610" fill="var(--raft)">No report within 30 s (--tablet_creation_timeout_ms)? mark the tablet REPLACED and</text>
+        <text class="s" x="520" y="626" fill="var(--raft)">start over with a new tablet id on other servers.</text>
+      </svg>
+      </div>
+      <figcaption>The master only <em>asks</em> for replicas; the tablet servers do the creating, and the first Raft leader is chosen by the replicas themselves (Part 4 covers elections). The master finds out through the heartbeat, which is the next section. If the master dies after step ③ but before everyone reports, the new leader reloads the <code>CREATING</code> tablets and carries on.</figcaption>
+    </figure>
+  </section>
+
+  <section id="placement">
+    <h2>Choosing where replicas go</h2>
+    <div class="prose">
+      <p>The master's <code>PlacementPolicy</code> avoids a global sort. For each replica it draws two random tablet servers and keeps the less loaded one, then repeats with those servers excluded. This is the "power of two choices" idea: it balances well, it is cheap, and it does not send every new tablet to the one emptiest server.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 360" role="img" aria-label="Five tablet servers with different replica counts. Three rounds each compare two random candidates and pick the less loaded: server 4, then 2, then 3.">
+        <text class="s" x="20" y="22">EXAMPLE LOAD (live replicas + recent creations), illustrative numbers</text>
+        <g>
+          <rect class="b-disk" x="40" y="60" width="130" height="150" rx="4" style="fill-opacity:.4"/><rect class="b-ts" x="40" y="90" width="130" height="120" rx="4"/><text class="t c" x="105" y="150">120</text><text class="s c" x="105" y="232">TS-1</text>
+          <rect class="b-disk" x="220" y="60" width="130" height="150" rx="4" style="fill-opacity:.4"/><rect class="b-ts" x="220" y="130" width="130" height="80" rx="4"/><text class="t c" x="285" y="175">80</text><text class="s c" x="285" y="232">TS-2</text>
+          <rect class="b-disk" x="400" y="60" width="130" height="150" rx="4" style="fill-opacity:.4"/><rect class="b-ts" x="400" y="115" width="130" height="95" rx="4"/><text class="t c" x="465" y="165">95</text><text class="s c" x="465" y="232">TS-3</text>
+          <rect class="b-disk" x="580" y="60" width="130" height="150" rx="4" style="fill-opacity:.4"/><rect class="b-ts" x="580" y="150" width="130" height="60" rx="4"/><text class="t c" x="645" y="185">60</text><text class="s c" x="645" y="232">TS-4</text>
+          <rect class="b-disk" x="760" y="60" width="130" height="150" rx="4" style="fill-opacity:.4"/><rect class="b-ts" x="760" y="100" width="130" height="110" rx="4"/><text class="t c" x="825" y="160">110</text><text class="s c" x="825" y="232">TS-5</text>
+        </g>
+        <rect class="b-client" x="40" y="262" width="270" height="78" rx="6"/><text class="t" x="52" y="284">Round 1</text><text class="s" x="52" y="304">draw TS-1 (120) and TS-4 (60)</text><text class="s" x="52" y="322">keep <tspan class="t">TS-4</tspan>, the lighter one</text>
+        <rect class="b-client" x="350" y="262" width="270" height="78" rx="6"/><text class="t" x="362" y="284">Round 2</text><text class="s" x="362" y="304">skip TS-4; draw TS-2 (80), TS-5 (110)</text><text class="s" x="362" y="322">keep <tspan class="t">TS-2</tspan></text>
+        <rect class="b-client" x="660" y="262" width="270" height="78" rx="6"/><text class="t" x="672" y="284">Round 3</text><text class="s" x="672" y="304">skip TS-4, TS-2; draw TS-1, TS-3</text><text class="s" x="672" y="322">keep <tspan class="t">TS-3</tspan> (95 &lt; 120)</text>
+      </svg>
+      </div>
+      <figcaption>The result for this tablet is TS-4, TS-2 and TS-3. Only servers that sent a heartbeat in the last 60 seconds (<code>--tserver_unresponsive_timeout_ms</code>) are candidates. With fewer servers than the replication factor, creation fails with "Not enough tablet servers are online". With location awareness configured, the policy also spreads replicas across locations, and it can balance per table or per range instead of overall.</figcaption>
+    </figure>
+  </section>
+
+  <section id="heartbeat">
+    <h2>How the master learns what happened</h2>
+    <div class="prose">
+      <p>The master never polls tablet servers. Each one sends a <code>TSHeartbeat</code> every second to <em>every</em> master. Only the leader acts on it. The heartbeat is also how the master finds out that a replica was created, who its leader is, and which schema version it runs.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 520" role="img" aria-label="Flow of TSHeartbeat handling: register or look up the tablet server, update heartbeat time, ask for a full report if none was sent, then process each reported tablet with four rules.">
+        <defs><marker id="c6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-ts" x="20" y="20" width="260" height="46" rx="6"/><text class="t" x="34" y="42">TSHeartbeat arrives</text><text class="s" x="34" y="58">identity, optional registration, optional report</text>
+        <rect class="b-master" x="20" y="96" width="260" height="46" rx="6"/><text class="t" x="34" y="118">Am I the leader?</text><text class="s" x="34" y="134">reply carries leader_master = true or false</text>
+        <rect class="b-master" x="20" y="172" width="260" height="62" rx="6"/><text class="t" x="34" y="194">Registration present?</text><text class="s" x="34" y="212">yes: RegisterTS in TSManager</text><text class="s" x="34" y="228">no: look the server up</text>
+        <rect class="b-raft" x="320" y="172" width="260" height="62" rx="6"/><text class="t" x="334" y="194">Unknown server?</text><text class="s" x="334" y="212">reply needs_reregister and</text><text class="s" x="334" y="228">needs_full_tablet_report, stop</text>
+        <rect class="b-master" x="20" y="264" width="260" height="46" rx="6"/><text class="t" x="34" y="286">Update last-heartbeat time</text><text class="s" x="34" y="302">keeps the server eligible for placement</text>
+        <rect class="b-master" x="20" y="340" width="260" height="62" rx="6"/><text class="t" x="34" y="362">Tablet report in the message?</text><text class="s" x="34" y="380">no: reply asking for a full report</text><text class="s" x="34" y="396">yes: ProcessTabletReport</text>
+        <path class="ln" marker-end="url(#c6)" d="M150 66 V94"/><path class="ln" marker-end="url(#c6)" d="M150 142 V170"/><path class="ln" marker-end="url(#c6)" d="M150 234 V262"/><path class="ln" marker-end="url(#c6)" d="M150 310 V338"/>
+        <path class="ln-d" marker-end="url(#c6)" d="M280 203 H 318"/><text class="s h" x="288" y="194">miss</text>
+        <path class="ln" marker-end="url(#c6)" d="M280 371 H 358"/>
+
+        <rect class="grp" x="360" y="268" width="600" height="244" rx="8"/><text class="t" x="376" y="292">ProcessTabletReport: rules applied to each reported tablet</text>
+        <rect class="b-raft" x="376" y="306" width="568" height="44" rx="5"/><text class="t" x="388" y="325">Master does not know it, or it is deleted</text><text class="s" x="388" y="341">send DeleteTablet to that server, so orphans are cleaned up (also retries earlier lost deletes)</text>
+        <rect class="b-ts" x="376" y="358" width="568" height="44" rx="5"/><text class="t" x="388" y="377">Tablet is CREATING and the report names a leader</text><text class="s" x="388" y="393">mark RUNNING and persist it</text>
+        <rect class="b-master" x="376" y="410" width="568" height="44" rx="5"/><text class="t" x="388" y="429">Raft config or leader changed</text><text class="s" x="388" y="445">update the cached consensus state; this is what GetTableLocations returns to clients</text>
+        <rect class="b-client" x="376" y="462" width="568" height="44" rx="5"/><text class="t" x="388" y="481">Reported schema version is older than the table's</text><text class="s" x="388" y="497">send AlterTable to that server (covers servers that were down during an alter)</text>
+
+        <text class="s" x="320" y="30">Also in the heartbeat response, when needed:</text>
+        <text class="s" x="320" y="50">· a signed TLS certificate for the tablet server (from the internal CA)</text>
+        <text class="s" x="320" y="68">· new public token-signing keys, from the leader only</text>
+        <text class="s" x="320" y="86">· needs_full_tablet_report, set when a new leader has no state for this server</text>
+        <text class="s" x="320" y="124">The report is incremental by default: only tablets that changed since the</text>
+        <text class="s" x="320" y="142">last acknowledged one, which keeps heartbeats small on busy servers.</text>
+      </svg>
+      </div>
+      <figcaption>Because every state change flows through this path, the master's picture is eventually consistent. A client may briefly be told about an old leader. Its next write to that server fails with "not leader", the <code>MetaCache</code> refreshes, and the retry succeeds.</figcaption>
+    </figure>
+  </section>
+
+  <section id="lookup">
+    <h2>How a client finds a tablet</h2>
+    <div class="prose">
+      <p>Back in Part 1, the client's first step was <code>GetTableLocations</code>. Here is the master's side of it. The table keeps its tablets ordered by partition key, so a key range maps to a short list of tablets, and each tablet already carries the replica addresses and leader it learned from heartbeats.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 300" role="img" aria-label="GetTableLocations finds the table by name, selects tablets in the key range, and builds the answer from each tablet's cached Raft state and the TSManager's addresses.">
+        <defs><marker id="c7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-client" x="20" y="40" width="170" height="90" rx="6"/><text class="t" x="34" y="64">Client</text><text class="s" x="34" y="84">GetTableLocations</text><text class="s" x="34" y="102">table "metrics",</text><text class="s" x="34" y="120">key range [a, f)</text>
+        <rect class="b-ts" x="240" y="40" width="170" height="90" rx="6"/><text class="t" x="254" y="64">Find the table</text><text class="s" x="254" y="84">by name in the map,</text><text class="s" x="254" y="102">check ACL, check it</text><text class="s" x="254" y="120">is not deleted</text>
+        <rect class="b-ts" x="460" y="40" width="170" height="90" rx="6"/><text class="t" x="474" y="64">Tablets in range</text><text class="s" x="474" y="84">sorted by partition</text><text class="s" x="474" y="102">key, so a lookup is a</text><text class="s" x="474" y="120">range scan of a map</text>
+        <rect class="b-master" x="680" y="40" width="280" height="90" rx="6"/><text class="t" x="694" y="64">Per tablet</text><text class="s" x="694" y="84">cached leader and voters (from reports)</text><text class="s" x="694" y="102">+ addresses from TSManager</text><text class="s" x="694" y="120">fails with TABLET_NOT_RUNNING if CREATING</text>
+        <path class="ln" marker-end="url(#c7)" d="M190 85 H 238"/><path class="ln" marker-end="url(#c7)" d="M410 85 H 458"/><path class="ln" marker-end="url(#c7)" d="M630 85 H 678"/>
+        <path class="ln-d" marker-end="url(#c7)" d="M820 130 C 820 200, 105 200, 105 132"/>
+        <text class="s h c" x="460" y="210">response: tablet ranges, replica addresses, leader hint, and a TTL</text>
+        <rect class="b-disk" x="20" y="226" width="940" height="56" rx="6"/><text class="s" x="34" y="248">The client caches the answer for up to <tspan class="m">--table_locations_ttl_ms</tspan> (5 minutes). New range partitions may not appear in existing clients until that time passes.</text><text class="s" x="34" y="268">Hot tables can also hit a master-side response cache keyed by the request, so a repeated lookup skips the tablet walk.</text>
+      </svg>
+      </div>
+      <figcaption>This is a read of in-memory state under a read lock, with no disk access. Even large clusters can answer thousands of lookups per second, because clients ask rarely and cache results.</figcaption>
+    </figure>
+  </section>
+
+  <section id="alter">
+    <h2>Altering and deleting</h2>
+    <div class="prose">
+      <p>The same pattern repeats: change the catalog first, then tell the tablet servers asynchronously and keep retrying. Heartbeats are the safety net, because a server that missed an RPC will show the wrong state in its next report.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 400" role="img" aria-label="Delete: mark table removed, write sys.catalog, remove name, send DeleteTablet to replicas. Alter: mark altering, bump schema version, send AlterTable, replicas report new version, table returns to running.">
+        <defs><marker id="c8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="t" x="20" y="24">DeleteTable</text>
+        <rect class="b-master" x="20" y="40" width="200" height="86" rx="6"/><text class="t" x="32" y="62">① Mark deleted</text><text class="s" x="32" y="82">table REMOVED, tablets</text><text class="s" x="32" y="98">DELETED, in one</text><text class="s" x="32" y="114">sys.catalog write</text>
+        <rect class="b-master" x="250" y="40" width="200" height="86" rx="6"/><text class="t" x="262" y="62">② Hide the name</text><text class="s" x="262" y="82">removed from the name</text><text class="s" x="262" y="98">map; new lookups get</text><text class="s" x="262" y="114">NotFound</text>
+        <rect class="b-raft" x="480" y="40" width="230" height="86" rx="6"/><text class="t" x="492" y="62">③ DeleteTablet RPCs</text><text class="s" x="492" y="82">one per replica, in parallel,</text><text class="s" x="492" y="98">retried until answered</text><text class="s" x="492" y="114">(old clients still work briefly)</text>
+        <rect class="b-ts" x="740" y="40" width="220" height="86" rx="6"/><text class="t" x="752" y="62">④ Server tombstones</text><text class="s" x="752" y="82">the replica and frees</text><text class="s" x="752" y="98">its blocks; a later report</text><text class="s" x="752" y="114">confirms</text>
+        <path class="ln" marker-end="url(#c8)" d="M220 83 H 248"/><path class="ln" marker-end="url(#c8)" d="M450 83 H 478"/><path class="ln" marker-end="url(#c8)" d="M710 83 H 738"/>
+
+        <text class="t" x="20" y="184">AlterTable</text>
+        <rect class="b-master" x="20" y="200" width="170" height="104" rx="6"/><text class="t" x="32" y="222">① Validate, mark</text><text class="s" x="32" y="242">table ALTERING, bump</text><text class="s" x="32" y="258">schema_version, write</text><text class="s" x="32" y="274">sys.catalog</text>
+        <rect class="b-raft" x="215" y="200" width="190" height="104" rx="6"/><text class="t" x="227" y="222">② AlterTable RPCs</text><text class="s" x="227" y="242">to every replica of every</text><text class="s" x="227" y="258">tablet; a server that was</text><text class="s" x="227" y="274">down gets it after it reports</text>
+        <rect class="b-ts" x="430" y="200" width="190" height="104" rx="6"/><text class="t" x="442" y="222">③ Replica applies it</text><text class="s" x="442" y="242">as an AlterSchemaOp</text><text class="s" x="442" y="258">through Raft, so all</text><text class="s" x="442" y="274">replicas change together</text>
+        <rect class="b-master" x="645" y="200" width="150" height="104" rx="6"/><text class="t" x="657" y="222">④ Report</text><text class="s" x="657" y="242">heartbeat carries</text><text class="s" x="657" y="258">the new schema</text><text class="s" x="657" y="274">version</text>
+        <rect class="b-ts" x="820" y="200" width="140" height="104" rx="6"/><text class="t" x="832" y="222">⑤ RUNNING</text><text class="s" x="832" y="242">when all tablets</text><text class="s" x="832" y="258">match, state flips</text><text class="s" x="832" y="274">back; IsAlterTable</text><text class="s" x="832" y="290">Done says yes</text>
+        <path class="ln" marker-end="url(#c8)" d="M190 252 H 213"/><path class="ln" marker-end="url(#c8)" d="M405 252 H 428"/><path class="ln" marker-end="url(#c8)" d="M620 252 H 643"/><path class="ln" marker-end="url(#c8)" d="M795 252 H 818"/>
+        <rect class="b-client" x="20" y="332" width="940" height="52" rx="6"/><text class="s" x="34" y="354">Deleted metadata stays in the master for a while. With <tspan class="m">--enable_metadata_cleanup_for_deleted_tables_and_tablets</tspan> (off by default),</text><text class="s" x="34" y="372">it is purged after <tspan class="m">--metadata_for_deleted_table_and_tablet_reserved_secs</tspan> (one hour).</text>
+      </svg>
+      </div>
+      <figcaption>Both operations are idempotent and survive a master crash, because the intent is already in <code>sys.catalog</code> and the next leader resumes the retries from the stored states.</figcaption>
+    </figure>
+  </section>
+
+  <section id="failover">
+    <h2>When the leader master dies</h2>
+    <div class="prose">
+      <p>Masters form a Raft group over <code>sys.catalog</code>. If the leader fails, the remaining masters elect a new one. The new leader has the data (it replicated every write) but not the in-memory state, so it rebuilds that state before it serves requests.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 420" role="img" aria-label="Four stages of master failover: steady state, leader fails and election, new leader prepares by catching up and loading metadata, then serves and requests full tablet reports.">
+        <defs><marker id="c9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <g>
+          <rect class="grp" x="10" y="10" width="226" height="400" rx="8"/><text class="t" x="24" y="34">① Steady state</text>
+          <rect class="b-master" x="30" y="52" width="186" height="44" rx="5"/><text class="t" x="42" y="72">M1 leader</text><text class="s" x="42" y="88">serves all requests</text>
+          <rect class="b-disk" x="30" y="106" width="186" height="44" rx="5"/><text class="t" x="42" y="126">M2 follower</text><text class="s" x="42" y="142">has the log, serves none</text>
+          <rect class="b-disk" x="30" y="160" width="186" height="44" rx="5"/><text class="t" x="42" y="180">M3 follower</text><text class="s" x="42" y="196">has the log, serves none</text>
+          <text class="s" x="26" y="236">Tablet servers heartbeat</text><text class="s" x="26" y="252">to all three. Followers</text><text class="s" x="26" y="268">answer with leader_master</text><text class="s" x="26" y="284">= false and update only</text><text class="s" x="26" y="300">their view of each server.</text>
+        </g>
+        <g>
+          <rect class="grp" x="250" y="10" width="226" height="400" rx="8"/><text class="t" x="264" y="34">② Leader fails</text>
+          <rect class="b-raft" x="270" y="52" width="186" height="44" rx="5" style="fill-opacity:.4"/><text class="t" x="282" y="72">M1 down</text><text class="s" x="282" y="88">heartbeats stop</text>
+          <rect class="b-master" x="270" y="106" width="186" height="44" rx="5"/><text class="t" x="282" y="126">M2 candidate</text><text class="s" x="282" y="142">no heartbeat, call election</text>
+          <rect class="b-disk" x="270" y="160" width="186" height="44" rx="5"/><text class="t" x="282" y="180">M3 votes</text><text class="s" x="282" y="196">M2 now has 2 of 3</text>
+          <text class="s" x="266" y="236">Clients get "not leader" or</text><text class="s" x="266" y="252">connection errors and try</text><text class="s" x="266" y="268">the other masters. Running</text><text class="s" x="266" y="284">tablets keep serving reads</text><text class="s" x="266" y="300">and writes untouched.</text>
+        </g>
+        <g>
+          <rect class="grp" x="490" y="10" width="226" height="400" rx="8"/><text class="t" x="504" y="34">③ New leader prepares</text>
+          <rect class="b-master" x="510" y="52" width="186" height="44" rx="5"/><text class="t" x="522" y="72">M2 leader</text><text class="s" x="522" y="88">elected, not yet serving</text>
+          <text class="s" x="506" y="126">1. wait until its log has</text><text class="s" x="506" y="142">   applied every entry</text>
+          <text class="s" x="506" y="166">2. load every table and</text><text class="s" x="506" y="182">   tablet from sys.catalog</text><text class="s" x="506" y="198">   into memory</text>
+          <text class="s" x="506" y="222">3. load or create cluster id,</text><text class="s" x="506" y="238">   root CA, token signing keys</text>
+          <text class="s" x="506" y="262">Requests meanwhile get a</text><text class="s" x="506" y="278">"not ready" error and retry.</text>
+          <text class="s" x="506" y="310">Leader state is "known" only</text><text class="s" x="506" y="326">after the load finishes.</text>
+        </g>
+        <g>
+          <rect class="grp" x="730" y="10" width="240" height="400" rx="8"/><text class="t" x="744" y="34">④ Serving again</text>
+          <rect class="b-master" x="750" y="52" width="200" height="44" rx="5"/><text class="t" x="762" y="72">M2 leader</text><text class="s" x="762" y="88">catalog loaded</text>
+          <text class="s" x="746" y="126">Its cached leaders and</text><text class="s" x="746" y="142">replica states are empty,</text><text class="s" x="746" y="158">so each heartbeat reply sets</text><text class="s" x="746" y="174"><tspan class="m">needs_full_tablet_report</tspan></text>
+          <text class="s" x="746" y="204">Within seconds every server</text><text class="s" x="746" y="220">resends all its tablets and the</text><text class="s" x="746" y="236">cache is rebuilt, including</text><text class="s" x="746" y="252">who leads each tablet.</text>
+          <text class="s" x="746" y="284">The bg thread restarts too:</text><text class="s" x="746" y="300">pending assignments, deletes</text><text class="s" x="746" y="316">and alters continue where</text><text class="s" x="746" y="332">the last leader stopped.</text>
+        </g>
+        <path class="ln" marker-end="url(#c9)" d="M236 360 H 248"/><path class="ln" marker-end="url(#c9)" d="M476 360 H 488"/><path class="ln" marker-end="url(#c9)" d="M716 360 H 728"/>
+      </svg>
+      </div>
+      <figcaption>The data path is untouched by master failover, since clients cache locations and tablet servers elect their own Raft leaders. What stalls is DDL and uncached lookups, typically for seconds. This is why production clusters run three masters, and why a single-master setup has no failover at all.</figcaption>
+    </figure>
+  </section>
+
+  <section id="map">
+    <h2>Where to find it in the source</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Where (in <code>src/kudu/master/</code>)</th><th>What to look for</th></tr></thead>
+        <tbody>
+          <tr><td><code>catalog_manager.cc</code> · <code>CreateTableHelper</code></td><td>The synchronous half of table creation</td></tr>
+          <tr><td><code>catalog_manager.cc</code> · <code>CatalogManagerBgTasks::Run</code>, <code>ProcessPendingAssignments</code></td><td>The background loop and tablet assignment</td></tr>
+          <tr><td><code>catalog_manager.cc</code> · <code>SelectReplicasForTablet</code>, <code>placement_policy.cc</code></td><td>Where replicas are placed</td></tr>
+          <tr><td><code>catalog_manager.cc</code> · <code>ProcessTabletReport</code></td><td>Rules applied to every heartbeat's tablet report</td></tr>
+          <tr><td><code>catalog_manager.cc</code> · <code>AsyncCreateReplica</code>, <code>AsyncAlterTable</code>, <code>AsyncDeleteReplica</code></td><td>Master-to-tablet-server RPC tasks with retry</td></tr>
+          <tr><td><code>catalog_manager.cc</code> · <code>PrepareForLeadershipTask</code></td><td>What a new leader does before serving</td></tr>
+          <tr><td><code>catalog_manager.cc</code> · <code>GetTableLocations</code></td><td>Server side of the client's lookup</td></tr>
+          <tr><td><code>sys_catalog.cc</code></td><td>The <code>sys.catalog</code> schema, reads and writes</td></tr>
+          <tr><td><code>master_service.cc</code> · <code>TSHeartbeat</code></td><td>Registration, lookup and the report hand-off</td></tr>
+          <tr><td><code>ts_manager.cc</code> · <code>ts_descriptor.cc</code></td><td>The set of known tablet servers and their load</td></tr>
+          <tr><td><code>master.proto</code></td><td>All RPC messages and the state enums</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>The tablet server side of creation is <code>TabletServiceAdminImpl::CreateTablet</code> in <code>tserver/tablet_service.cc</code> and <code>TSTabletManager::CreateNewTablet</code> in <code>tserver/ts_tablet_manager.cc</code>. The background reading is <code>docs/design-docs/master.md</code>, but it predates the single-write change described above, so trust the code where they differ.</p>
+      <p><strong>Next parts:</strong> Raft in Kudu (elections, log replication, config changes), then a line-by-line trace of <code>WriteOp</code>.</p>
+    </div>
+  </section>
+</main>
