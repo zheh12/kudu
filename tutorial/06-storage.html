@@ -1,0 +1,620 @@
+<title>Kudu Storage Engine Tutorial</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column; wide figures scroll inside their own frame on phones.
+   Palette is keyed to the roles in the system: client (ochre), master (indigo), tablet server (teal), Raft/WAL (rust), disk (slate). */
+:root {
+  --bg: #f4f7f8; --surf: #ffffff; --fg: #14212b; --muted: #55646e; --line: #d0d9df; --line2: #8fa0ab;
+  --client: #a9680f; --client-t: #fbeed6;
+  --master: #4a4db8; --master-t: #e6e7fa;
+  --ts: #0d7566; --ts-t: #d9f1ed;
+  --raft: #bb4a22; --raft-t: #fae3d9;
+  --disk: #52646f; --disk-t: #e6ecef;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+    --client: #e3ad50; --client-t: #3a2f17;
+    --master: #a1a3f5; --master-t: #25284d;
+    --ts: #4fc9b4; --ts-t: #11322d;
+    --raft: #f2905f; --raft-t: #3d2218;
+    --disk: #a3b4bf; --disk-t: #22323c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+  --client: #e3ad50; --client-t: #3a2f17;
+  --master: #a1a3f5; --master-t: #25284d;
+  --ts: #4fc9b4; --ts-t: #11322d;
+  --raft: #f2905f; --raft-t: #3d2218;
+  --disk: #a3b4bf; --disk-t: #22323c;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.65 var(--body);
+  padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.prose { max-width: 68ch; display: flex; flex-direction: column; gap: 12px; }
+p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.1rem; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+code { font: 500 .88em var(--mono); background: var(--disk-t); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--master); }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { background: var(--surf); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { font-size: .92rem; color: var(--muted); max-width: 78ch; }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.role { background: var(--surf); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role h3 { color: var(--c); }
+.role p, .role li { font-size: .95rem; }
+.role ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; max-width: 76ch; }
+.note { border-left: 3px solid var(--raft); padding: 4px 0 4px 14px; color: var(--muted); max-width: 68ch; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font: 500 13px var(--mono); text-decoration: none; color: var(--fg); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+/* SVG vocabulary */
+svg text { font-family: var(--body); fill: var(--fg); font-size: 13px; }
+svg .t { font-weight: 600; }
+svg .s { font-size: 11.5px; fill: var(--muted); }
+svg .m { font-family: var(--mono); font-size: 11.5px; }
+svg .h { paint-order: stroke; stroke: var(--surf); stroke-width: 5px; stroke-linejoin: round; }
+svg .c { text-anchor: middle; }
+svg .e { text-anchor: end; }
+svg .box { fill: var(--surf); stroke: var(--line2); stroke-width: 1.4; }
+svg .grp { fill: none; stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .b-client { fill: var(--client-t); stroke: var(--client); stroke-width: 1.5; }
+svg .b-master { fill: var(--master-t); stroke: var(--master); stroke-width: 1.5; }
+svg .b-ts { fill: var(--ts-t); stroke: var(--ts); stroke-width: 1.5; }
+svg .b-raft { fill: var(--raft-t); stroke: var(--raft); stroke-width: 1.5; }
+svg .b-disk { fill: var(--disk-t); stroke: var(--disk); stroke-width: 1.5; }
+svg .solid-ts { fill: var(--ts); stroke: var(--ts); }
+svg .solid-ts + text, svg text.on { fill: var(--surf); }
+svg .ln { fill: none; stroke: currentColor; stroke-width: 1.5; }
+svg .ln-r { fill: none; stroke: var(--raft); stroke-width: 1.6; stroke-dasharray: 6 4; }
+svg .ln-d { fill: none; stroke: var(--line2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+svg .life { stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 3 5; }
+</style>
+
+<main>
+  <header class="prose">
+    <span class="eyebrow">Learning Kudu · Part 6</span>
+    <h1>The storage engine</h1>
+    <p class="lede">Part 5 ended with a row in a MemRowSet. This part follows it to disk and keeps following it for as long as it lives: flushed into columnar files, patched by small delta files, merged by background compactions, and finally garbage collected. The scheduler that decides when each of those jobs runs is covered at the end.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#life">Life of a row</a><a href="#tablet">Tablet components</a><a href="#drs">DiskRowSet</a><a href="#cfile">CFile</a><a href="#flush">Flush</a><a href="#undo">UNDO and REDO</a><a href="#deltas">Delta lifecycle</a><a href="#compact">Compactions</a><a href="#policy">Choosing rowsets</a><a href="#mm">Scheduler</a><a href="#gc">History GC</a><a href="#blocks">Block manager</a><a href="#tune">Tuning</a><a href="#map">Source map</a>
+    </nav>
+  </header>
+
+  <section id="life">
+    <h2>The life of a row on disk</h2>
+    <div class="prose">
+      <p>Kudu is a log-structured, columnar store, but it is not an LSM tree in the BigTable sense. Two design choices set it apart. A primary key lives in <strong>exactly one</strong> rowset, so a point read never merges versions from several files. And updates to flushed rows are stored as <strong>deltas addressed by row number</strong>, not by key, so they can be applied to a column without reading the key.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 470" role="img" aria-label="Lifecycle: inserts enter the MemRowSet, a flush writes DiskRowSets; updates go to the DeltaMemStore, which flushes to REDO delta files; minor and major delta compactions and merging compactions reshape the files; history GC removes old UNDO data.">
+        <defs><marker id="f1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">IN MEMORY</text><text class="s" x="330" y="22">ON DISK</text>
+        <rect class="b-client" x="20" y="40" width="130" height="40" rx="5"/><text class="t c" x="85" y="65">INSERT</text>
+        <rect class="b-ts" x="20" y="110" width="200" height="92" rx="6"/><text class="t" x="34" y="132">MemRowSet</text><text class="s" x="34" y="152">new rows and their changes,</text><text class="s" x="34" y="168">sorted by key, charged to RAM</text><text class="s" x="34" y="184">and to the WAL</text>
+        <path class="ln" marker-end="url(#f1)" d="M85 80 V108"/>
+        <rect class="b-client" x="20" y="260" width="160" height="40" rx="5"/><text class="t c" x="100" y="285">UPDATE / DELETE</text>
+        <rect class="b-ts" x="20" y="326" width="200" height="76" rx="6"/><text class="t" x="34" y="348">DeltaMemStore</text><text class="s" x="34" y="368">one per DiskRowSet; changes</text><text class="s" x="34" y="384">keyed by (row number, time)</text>
+        <path class="ln" marker-end="url(#f1)" d="M100 300 V324"/>
+
+        <rect class="grp" x="330" y="40" width="630" height="362" rx="8"/><text class="t" x="346" y="62">Tablet's DiskRowSets</text>
+        <rect class="b-disk" x="350" y="76" width="280" height="150" rx="6"/><text class="t" x="364" y="98">DiskRowSet A</text>
+        <rect class="b-raft" x="364" y="108" width="80" height="44" rx="4"/><text class="s c" x="404" y="134">UNDO</text>
+        <rect class="b-ts" x="448" y="108" width="100" height="44" rx="4"/><text class="s c" x="498" y="134">base data</text>
+        <rect class="b-client" x="552" y="108" width="66" height="44" rx="4"/><text class="s c" x="585" y="134">REDO</text>
+        <text class="s" x="364" y="176">columnar CFiles + key index + bloom</text><text class="s" x="364" y="194">filter; about 32 MiB when written</text>
+        <rect class="b-disk" x="650" y="76" width="290" height="150" rx="6"/><text class="t" x="664" y="98">DiskRowSet B, C ...</text>
+        <text class="s" x="664" y="132">Key ranges may overlap. A given key</text><text class="s" x="664" y="150">exists in only one of them.</text>
+        <path class="ln" marker-end="url(#f1)" d="M220 156 C 280 156, 290 150, 348 150"/><text class="s h" x="236" y="146">flush</text>
+        <path class="ln" marker-end="url(#f1)" d="M220 352 C 300 352, 310 232, 348 214"/><text class="s h" x="232" y="300">flush DMS</text><text class="s h" x="232" y="316">→ REDO file</text>
+
+        <rect class="b-master" x="350" y="250" width="590" height="132" rx="6"/><text class="t" x="364" y="272">Background compactions (Maintenance Manager)</text>
+        <text class="s" x="364" y="296"><tspan class="t">Minor delta:</tspan> merge several REDO files into one</text>
+        <text class="s" x="364" y="316"><tspan class="t">Major delta:</tspan> fold REDO into base data; replaced by new UNDO</text>
+        <text class="s" x="364" y="336"><tspan class="t">Merging:</tspan> rewrite overlapping rowsets as non-overlapping ones</text>
+        <text class="s" x="364" y="356"><tspan class="t">History GC:</tspan> drop UNDO older than the retention window; drop deleted rows</text>
+        <text class="s" x="20" y="440">The WAL of Part 4 only needs to hold what is still in a MemRowSet or DeltaMemStore. Each flush lets old log segments go.</text>
+      </svg>
+      </div>
+      <figcaption>The two memory stores are the only places that cost WAL space and RAM. Everything on disk is immutable: new files are written, the tablet's metadata is switched over atomically, and the old files are deleted.</figcaption>
+    </figure>
+  </section>
+
+  <section id="tablet">
+    <h2>What a tablet holds</h2>
+    <div class="prose">
+      <p>Part 5 used the phrase "the tablet's components". Concretely, a <code>Tablet</code> holds one MemRowSet and a <code>RowSetTree</code>, an interval tree of its DiskRowSets keyed by the smallest and largest primary key in each. A write or a point read asks the tree which rowsets could contain a key, and only those are probed.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 400" role="img" aria-label="A tablet has a MemRowSet and an interval tree of DiskRowSets drawn as ranges over the key space; a probe key hits two of five rowsets; the tablet metadata file lists each rowset's block ids.">
+        <defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">KEY SPACE OF ONE TABLET, LEFT TO RIGHT (each bar is a DiskRowSet's min to max key)</text>
+        <g>
+          <rect class="b-disk" x="40" y="40" width="300" height="30" rx="4"/><text class="s c" x="190" y="60">R1</text>
+          <rect class="b-disk" x="360" y="40" width="360" height="30" rx="4"/><text class="s c" x="540" y="60">R2</text>
+          <rect class="b-disk" x="740" y="40" width="200" height="30" rx="4"/><text class="s c" x="840" y="60">R3</text>
+          <rect class="b-disk" x="40" y="80" width="480" height="30" rx="4" style="stroke:var(--raft)"/><text class="s c" x="280" y="100">R4</text>
+          <rect class="b-disk" x="440" y="120" width="500" height="30" rx="4" style="stroke:var(--raft)"/><text class="s c" x="690" y="140">R5</text>
+        </g>
+        <path class="life" d="M480 34 V 160" style="stroke:var(--raft);stroke-width:1.6;stroke-dasharray:none"/>
+        <text class="s h" x="486" y="170" fill="var(--raft)">probe key</text><text class="s" x="486" y="186">overlaps R2, R4, R5 only: three bloom filter checks, not five</text>
+        <text class="s" x="40" y="214">Height at the probe key = 3. Compaction aims to lower this number.</text>
+
+        <rect class="b-ts" x="40" y="240" width="270" height="130" rx="6"/><text class="t" x="54" y="262">Tablet</text><text class="s" x="54" y="282">MemRowSet (new rows)</text><text class="s" x="54" y="300">RowSetTree (R1 to R5)</text><text class="s" x="54" y="318">MvccManager, LockManager</text><text class="s" x="54" y="336">TabletMetadata</text>
+        <rect class="b-raft" x="350" y="240" width="590" height="130" rx="6"/><text class="t" x="364" y="262">TabletMetadata on disk (tablet-meta/ directory, one file per tablet)</text>
+        <text class="s" x="364" y="284">schema, partition, and the list of rowsets. For each rowset:</text>
+        <text class="m" x="364" y="306">column id → block id   (one block per column)</text>
+        <text class="m" x="364" y="324">bloom block id · ad-hoc key index block id (composite keys)</text>
+        <text class="m" x="364" y="342">undo delta block ids · redo delta block ids · last flushed DMS id</text>
+        <text class="s" x="364" y="360">Replaced as a whole, atomically, whenever a flush or compaction finishes.</text>
+        <path class="ln" marker-end="url(#f2)" d="M310 305 H 348"/>
+      </svg>
+      </div>
+      <figcaption>Because R4 and R5 overlap R2, any operation near the probe key must consult three rowsets. This "height" is the number the compaction policy tries to push down. A tablet whose rowsets never overlap, such as a time-series table written in time order, needs only one probe per key.</figcaption>
+    </figure>
+  </section>
+
+  <section id="drs">
+    <h2>Inside one DiskRowSet</h2>
+    <div class="prose">
+      <p>A DiskRowSet is a small set of immutable blocks plus one mutable in-memory store. Rows are numbered <strong>0, 1, 2 ...</strong> in key order inside the rowset. That row number is never stored. It is the position of a value in each column file. Every file in the rowset, and every delta, speaks in row numbers.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 480" role="img" aria-label="A DiskRowSet has one column file per column, aligned by row number, a bloom filter, an ad-hoc key index for composite keys, UNDO delta files, REDO delta files, and an in-memory DeltaMemStore.">
+        <defs><marker id="f3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">ONE DiskRowSet OF 5 ROWS FOR TABLE metrics (host, time, cpu); PRIMARY KEY (host, time)</text>
+        <text class="s c" x="75" y="52">row</text><text class="s c" x="220" y="52">host</text><text class="s c" x="360" y="52">time</text><text class="s c" x="500" y="52">cpu</text>
+        <g class="m">
+          <rect class="b-ts" x="20" y="60" width="110" height="34" rx="0"/><text class="m c" x="75" y="82">0</text>
+          <rect class="b-ts" x="20" y="94" width="110" height="34" rx="0"/><text class="m c" x="75" y="116">1</text>
+          <rect class="b-ts" x="20" y="128" width="110" height="34" rx="0"/><text class="m c" x="75" y="150">2</text>
+          <rect class="b-ts" x="20" y="162" width="110" height="34" rx="0"/><text class="m c" x="75" y="184">3</text>
+          <rect class="b-ts" x="20" y="196" width="110" height="34" rx="0"/><text class="m c" x="75" y="218">4</text>
+        </g>
+        <rect class="b-disk" x="150" y="60" width="140" height="170" rx="0"/><rect class="b-disk" x="290" y="60" width="140" height="170" rx="0"/><rect class="b-disk" x="430" y="60" width="140" height="170" rx="0"/>
+        <g class="m"><text class="m c" x="220" y="82">web-1</text><text class="m c" x="220" y="116">web-1</text><text class="m c" x="220" y="150">web-2</text><text class="m c" x="220" y="184">web-3</text><text class="m c" x="220" y="218">web-3</text>
+        <text class="m c" x="360" y="82">1000</text><text class="m c" x="360" y="116">2000</text><text class="m c" x="360" y="150">1500</text><text class="m c" x="360" y="184">1000</text><text class="m c" x="360" y="218">3000</text>
+        <text class="m c" x="500" y="82">0.10</text><text class="m c" x="500" y="116">0.20</text><text class="m c" x="500" y="150">0.15</text><text class="m c" x="500" y="184">0.42</text><text class="m c" x="500" y="218">null</text></g>
+        <text class="s c" x="220" y="250">column file 1</text><text class="s c" x="360" y="250">column file 2</text><text class="s c" x="500" y="250">column file 3</text>
+        <text class="s" x="20" y="274">Each column file is a separate block: a scan of cpu never reads host or time.</text>
+
+        <rect class="b-client" x="600" y="60" width="360" height="52" rx="6"/><text class="t" x="614" y="82">Bloom filter file</text><text class="s" x="614" y="100">"is this key possibly here?" ~0.01% false positives</text>
+        <rect class="b-client" x="600" y="122" width="360" height="108" rx="6"/><text class="t" x="614" y="144">Primary-key index</text><text class="s" x="614" y="166">key → row number.</text><text class="s" x="614" y="186">Embedded in the key column file when</text><text class="s" x="614" y="202">the key is one column; a separate "ad-hoc</text><text class="s" x="614" y="218">index" file for a composite key (host, time)</text>
+
+        <rect class="b-raft" x="20" y="300" width="270" height="66" rx="6"/><text class="t" x="34" y="322">UNDO delta file(s)</text><text class="s" x="34" y="342">changes that undo history, written</text><text class="s" x="34" y="358">at flush or compaction</text>
+        <rect class="b-client" x="310" y="300" width="270" height="66" rx="6"/><text class="t" x="324" y="322">REDO delta file(s)</text><text class="s" x="324" y="342">changes made after the flush,</text><text class="s" x="324" y="358">flushed from the DeltaMemStore</text>
+        <rect class="b-ts" x="600" y="300" width="360" height="66" rx="6"/><text class="t" x="614" y="322">DeltaMemStore (in memory)</text><text class="s" x="614" y="342">newest changes, keyed by (row number, timestamp);</text><text class="s" x="614" y="358">a concurrent B-tree like the MemRowSet</text>
+        <text class="m" x="20" y="396">row 3, cpu: 0.42 → 0.55 at ts 2001  is stored as   (3, 2001) → "cpu = 0.55"</text>
+        <text class="s" x="20" y="422">The change names row 3 and column cpu only. Applying it to a scan needs the cpu column file and the delta, never the key.</text>
+        <text class="s" x="20" y="446">A delta record may touch one column or many. An UPDATE that sets cpu does not rewrite host or time anywhere on disk.</text>
+        
+      </svg>
+      </div>
+      <figcaption>This is why updates are cheap for wide tables: a single changed column is a few bytes in a delta, not a rewritten row. The cost shows up later, on reads, when deltas must be merged in. Compaction keeps that cost bounded.</figcaption>
+    </figure>
+  </section>
+
+  <section id="cfile">
+    <h2>The file format: CFile</h2>
+    <div class="prose">
+      <p>Each column, each delta file, the bloom filter and the key index are stored as a <strong>CFile</strong>: a sequence of data blocks, then index blocks that let a reader jump to a row number or to a key, then a footer. A CFile is written once, in order, and then read-only. Several CFiles can live inside one larger file on disk, as the block manager section below explains.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 430" role="img" aria-label="CFile layout: header, data blocks with ordinal ranges, positional index, optional value index, footer. A seek to row N walks the positional index to the right data block.">
+        <defs><marker id="f4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">ONE CFILE (a single column, 3 data blocks)</text>
+        <rect class="b-disk" x="20" y="34" width="110" height="68" rx="4"/><text class="t c" x="75" y="62">header</text><text class="s c" x="75" y="80">magic kuducfl2</text>
+        <rect class="b-ts" x="130" y="34" width="150" height="68" rx="4"/><text class="t c" x="205" y="58">data block 0</text><text class="s c" x="205" y="76">rows 0 to 55</text><text class="s c" x="205" y="92">+ CRC32</text>
+        <rect class="b-ts" x="280" y="34" width="150" height="68" rx="4"/><text class="t c" x="355" y="58">data block 1</text><text class="s c" x="355" y="76">rows 56 to 132</text><text class="s c" x="355" y="92">+ CRC32</text>
+        <rect class="b-ts" x="430" y="34" width="150" height="68" rx="4"/><text class="t c" x="505" y="58">data block 2</text><text class="s c" x="505" y="76">rows 133 to 511</text><text class="s c" x="505" y="92">+ CRC32</text>
+        <rect class="b-client" x="580" y="34" width="190" height="68" rx="4"/><text class="t c" x="675" y="58">index blocks (B-tree)</text><text class="s c" x="675" y="76">positional: row → block</text><text class="s c" x="675" y="92">value: key → block (sorted)</text>
+        <rect class="b-disk" x="770" y="34" width="190" height="68" rx="4"/><text class="t c" x="865" y="58">footer</text><text class="s c" x="865" y="76">type, encoding, compression,</text><text class="s c" x="865" y="92">index roots, min/max key</text>
+        <path class="ln-d" marker-end="url(#f4)" d="M865 102 C 865 140, 700 140, 676 104"/><text class="s h" x="760" y="150">a reader opens the footer first</text>
+
+        <text class="t" x="20" y="196">Seeking to row 70</text>
+        <text class="s" x="20" y="218">1. the footer gives the root of the positional index   2. walk the index: row 70 lies in rows 56 to 132</text><text class="s" x="20" y="236">3. read data block 1 (from the block cache if it is there) and verify its checksum   4. decode and step to the 15th value in it.</text>
+
+        <text class="t" x="20" y="278">Encodings and defaults</text>
+        <rect class="b-disk" x="20" y="290" width="940" height="124" rx="6"/>
+        <text class="m" x="34" y="314">integers, floats</text><text class="s" x="260" y="314">BIT_SHUFFLE: bits of equal position are grouped, then LZ4-compressed; very small for slowly varying data</text>
+        <text class="m" x="34" y="336">strings, binary</text><text class="s" x="260" y="336">DICT_ENCODING: distinct values once, rows store small codes; a block falls back to plain once its dictionary fills</text>
+        <text class="m" x="34" y="358">bool</text><text class="s" x="260" y="358">RLE: runs of equal values</text>
+        <text class="m" x="34" y="380">alternatives</text><text class="s" x="260" y="380">PLAIN, PREFIX (sorted strings with shared prefixes), RLE for integers: chosen per column when the table is created</text>
+        <text class="m" x="34" y="402">compression</text><text class="s" x="260" y="402">off by default (cfile_default_compression_codec); per-column LZ4, Snappy or zlib; blocks default to 256 KiB</text>
+      </svg>
+      </div>
+      <figcaption>Only the blocks that a scan needs are read, and only the columns that it asks for. The positional index is what makes "apply this delta to row 3" cheap: row numbers map straight to a block. The value index, present on the key column or the ad-hoc key index, is what turns a key into a row number.</figcaption>
+    </figure>
+  </section>
+
+  <section id="flush">
+    <h2>Flushing a MemRowSet</h2>
+    <div class="prose">
+      <p>A flush turns the in-memory B-tree into DiskRowSets while the tablet keeps accepting writes. The trick is the same one that compactions use, so it is worth learning once: <strong>freeze a snapshot, write it out, then carry over whatever changed in the meantime</strong>.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 520" role="img" aria-label="Flush timeline: swap in a new empty MemRowSet, take an MVCC snapshot, write DiskRowSets from the old MemRowSet, then in phase two forward updates to both old and new rowsets, carry over missed deltas, update tablet metadata, swap, and release WAL anchors.">
+        <defs><marker id="f5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <path class="ln" marker-end="url(#f5)" d="M20 40 H 960"/><text class="s" x="20" y="28">time</text>
+        <rect class="grp" x="20" y="56" width="120" height="270" rx="4"/><text class="s c" x="80" y="76">STEADY</text>
+        <rect class="grp" x="140" y="56" width="400" height="270" rx="4"/><text class="s c" x="340" y="76">PHASE 1: write the snapshot</text>
+        <rect class="grp" x="540" y="56" width="260" height="270" rx="4"/><text class="s c" x="670" y="76">PHASE 2: catch up</text>
+        <rect class="grp" x="800" y="56" width="160" height="270" rx="4"/><text class="s c" x="880" y="76">DONE</text>
+
+        <rect class="b-ts" x="28" y="92" width="104" height="60" rx="4"/><text class="s c" x="80" y="112">writes go to</text><text class="s c" x="80" y="128">the MemRowSet</text><text class="s c" x="80" y="144">M1</text>
+        <rect class="b-master" x="148" y="92" width="384" height="62" rx="4"/><text class="t" x="158" y="112">① swap: M2 (empty) takes all new inserts; M1 is frozen</text><text class="s" x="158" y="130">wait for ops that were already applying into M1; take an MVCC</text><text class="s" x="158" y="146">snapshot S</text>
+        <rect class="b-client" x="148" y="168" width="384" height="62" rx="4"/><text class="t" x="158" y="188">② write M1 as of S into new DiskRowSets</text><text class="s" x="158" y="206">sequential writes, rolling to a new rowset at about 32 MiB;</text><text class="s" x="158" y="222">UNDO records produced from each row's mutation list</text>
+        <rect class="b-raft" x="148" y="244" width="384" height="72" rx="4"/><text class="t" x="158" y="262">meanwhile</text><text class="s" x="158" y="280">reads use M1; updates to rows in M1 keep landing in their</text><text class="s" x="158" y="296">mutation lists. Other updates go to M2 or the DiskRowSets.</text>
+
+        <rect class="b-master" x="548" y="92" width="244" height="62" rx="4"/><text class="t" x="558" y="112">③ duplicate</text><text class="s" x="558" y="130">swap in a DuplicatingRowSet: each</text><text class="s" x="558" y="146">update is applied to M1 and new rowset</text>
+        <rect class="b-client" x="548" y="168" width="244" height="62" rx="4"/><text class="t" x="558" y="188">④ re-update missed deltas</text><text class="s" x="558" y="206">changes made after S, before step 3,</text><text class="s" x="558" y="222">are replayed onto the new rowsets</text>
+        <rect class="b-disk" x="548" y="244" width="244" height="70" rx="4"/><text class="s" x="558" y="264">readers still use M1 and the old</text><text class="s" x="558" y="282">rowsets: the new rowsets are not</text><text class="s" x="558" y="298">visible until step 5 and 6</text>
+        <rect class="b-ts" x="808" y="92" width="144" height="100" rx="4"/><text class="t" x="816" y="112">⑤ commit</text><text class="s" x="816" y="130">flush tablet</text><text class="s" x="816" y="146">metadata: new</text><text class="s" x="816" y="162">rowsets in, M1 out</text><text class="s" x="816" y="178">(atomic)</text>
+        <rect class="b-ts" x="808" y="204" width="144" height="86" rx="4"/><text class="t" x="816" y="224">⑥ swap, clean</text><text class="s" x="816" y="242">new rowsets live;</text><text class="s" x="816" y="258">release WAL anchors</text><text class="s" x="816" y="274">of M1</text>
+
+        <rect class="b-client" x="20" y="356" width="940" height="140" rx="6"/><text class="t" x="34" y="380">Why this is safe, and why it is cheap on foreground writes</text>
+        <text class="s" x="34" y="402">· The flush never blocks writes: M2 is already open before any slow work starts, and the only blocking waits are for ops that are already applying (milliseconds).</text>
+        <text class="s" x="34" y="422">· The snapshot is an MVCC snapshot (Part 5), so M1 can still receive late-arriving applies to its mutation lists during phase 1 without corrupting what is being written.</text>
+        <text class="s" x="34" y="442">· A crash at any point before step 5 leaves the old metadata untouched. On restart, the WAL still holds everything M1 held, so the tablet replays it. Half-written files become garbage.</text>
+        <text class="s" x="34" y="462">· The same six steps run for a merging compaction, with input DiskRowSets in place of M1. The next section shows what changes for the bytes written.</text>
+      </svg>
+      </div>
+      <figcaption>The code is <code>Tablet::FlushUnlocked</code> and <code>DoMergeCompactionOrFlush</code>. Its progress messages ("entering phase 1", "entering phase 2") appear in the tablet server log at verbose level, and the <code>bytes_flushed</code> metric shows how much each flush wrote.</figcaption>
+    </figure>
+  </section>
+
+  <section id="undo">
+    <h2>UNDO and REDO: how history is kept</h2>
+    <div class="prose">
+      <p>The MemRowSet keeps the oldest version of a row plus a list of later changes: a REDO chain. On disk the base data is the <em>newest</em> version, and the history behind it is an UNDO chain. A flush therefore inverts the chain. A scan of current data reads the base and ignores UNDO, which is the case the layout is optimized for. A scan at an older snapshot applies UNDO records backwards until it reaches its time.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 440" role="img" aria-label="A row's history in the MemRowSet as a REDO chain, and on disk as newest base data with UNDO records; two scanners at different timestamps use different records.">
+        <defs><marker id="f6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="t" x="20" y="24">The history of one row</text>
+        <text class="m" x="20" y="48">ts 1  INSERT ("row", 1)    ts 2  UPDATE val = 2    ts 3  DELETE    ts 4  INSERT ("row", 3)</text>
+
+        <text class="t" x="20" y="88">In the MemRowSet: oldest version, then changes forward in time (REDO)</text>
+        <rect class="b-ts" x="20" y="100" width="150" height="46" rx="4"/><text class="m c" x="95" y="120">("row", 1)</text><text class="s c" x="95" y="136">inserted at ts 1</text>
+        <rect class="b-client" x="190" y="100" width="130" height="46" rx="4"/><text class="m c" x="255" y="120">@2 val = 2</text>
+        <rect class="b-client" x="340" y="100" width="130" height="46" rx="4"/><text class="m c" x="405" y="120">@3 DELETE</text>
+        <rect class="b-client" x="490" y="100" width="180" height="46" rx="4"/><text class="m c" x="580" y="120">@4 REINSERT (row,3)</text>
+        <path class="ln" marker-end="url(#f6)" d="M170 123 H 188"/><path class="ln" marker-end="url(#f6)" d="M320 123 H 338"/><path class="ln" marker-end="url(#f6)" d="M470 123 H 488"/>
+
+        <text class="t" x="20" y="188">After the flush: newest version, then changes backward in time (UNDO)</text>
+        <rect class="b-ts" x="20" y="200" width="150" height="46" rx="4"/><text class="m c" x="95" y="220">("row", 3)</text><text class="s c" x="95" y="236">base data</text>
+        <rect class="b-raft" x="190" y="200" width="150" height="46" rx="4"/><text class="m c" x="265" y="220">before 4: DELETE</text>
+        <rect class="b-raft" x="360" y="200" width="190" height="46" rx="4"/><text class="m c" x="455" y="220">before 3: INSERT (row,2)</text>
+        <rect class="b-raft" x="570" y="200" width="150" height="46" rx="4"/><text class="m c" x="645" y="220">before 2: val = 1</text>
+        <rect class="b-raft" x="740" y="200" width="150" height="46" rx="4"/><text class="m c" x="815" y="220">before 1: DELETE</text>
+        <path class="ln-r" marker-end="url(#f6)" d="M188 223 H 170" /><path class="ln-r" marker-end="url(#f6)" d="M358 223 H 342"/><path class="ln-r" marker-end="url(#f6)" d="M568 223 H 552"/><path class="ln-r" marker-end="url(#f6)" d="M738 223 H 722"/>
+
+        <rect class="b-master" x="20" y="272" width="450" height="146" rx="6"/><text class="t" x="34" y="296">Scanner at "now" (all of ts 1 to 4 committed)</text><text class="s" x="34" y="318">Read base ("row", 3).</text><text class="s" x="34" y="338">Every UNDO record's timestamp is committed in the snapshot,</text><text class="s" x="34" y="356">so none is applied. File-level statistics even let the reader</text><text class="s" x="34" y="374">skip opening the UNDO file at all.</text><text class="t" x="34" y="402">Result: ("row", 3)</text>
+        <rect class="b-master" x="490" y="272" width="470" height="146" rx="6"/><text class="t" x="504" y="296">Scanner at ts 1 (later changes not visible)</text><text class="s" x="504" y="318">Start from base ("row", 3).</text><text class="s" x="504" y="336">Undo ts 4 → deleted.  Undo ts 3 → ("row", 2).</text><text class="s" x="504" y="354">Undo ts 2 → ("row", 1).  Ts 1 is committed: stop.</text><text class="s" x="504" y="372">The UNDO chain is how time travel and incremental backups</text><text class="s" x="504" y="390">work.</text><text class="t" x="504" y="410">Result: ("row", 1)</text>
+      </svg>
+      </div>
+      <figcaption>Timestamps belong to <em>changes</em>, not to data. Once old UNDO records are garbage collected, Kudu keeps no record of when a row was first inserted. If you need an "inserted at" value, store it in a column yourself.</figcaption>
+    </figure>
+  </section>
+
+  <section id="deltas">
+    <h2>What happens to updates after the flush</h2>
+    <div class="prose">
+      <p>An update of a flushed row (Part 5, step 10) goes into the rowset's DeltaMemStore. From there it follows a short pipeline. The goal of the pipeline is to keep reads cheap: a read must look at the base data, then every REDO delta that is newer, so the fewer and smaller the deltas, the better.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 400" role="img" aria-label="Delta pipeline: DeltaMemStore flushes to REDO delta files; minor compaction merges several REDO files into one; major compaction folds REDO into new base data and new UNDO.">
+        <defs><marker id="f7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">ONE DiskRowSet OVER TIME (time moves down)</text>
+        <rect class="b-raft" x="20" y="36" width="90" height="46" rx="4"/><text class="s c" x="65" y="62">UNDO</text><rect class="b-ts" x="116" y="36" width="130" height="46" rx="4"/><text class="s c" x="181" y="62">base data</text><rect class="b-client" x="252" y="36" width="130" height="46" rx="4"/><text class="s c" x="317" y="56">DeltaMemStore</text><text class="s c" x="317" y="72">(RAM, growing)</text>
+        <text class="s" x="400" y="64">① Updates accumulate in RAM</text>
+        
+
+        <rect class="b-raft" x="20" y="116" width="90" height="46" rx="4"/><text class="s c" x="65" y="142">UNDO</text><rect class="b-ts" x="116" y="116" width="130" height="46" rx="4"/><text class="s c" x="181" y="142">base data</text>
+        <rect class="b-client" x="252" y="116" width="64" height="46" rx="4"/><text class="s c" x="284" y="142">R0</text><rect class="b-client" x="322" y="116" width="64" height="46" rx="4"/><text class="s c" x="354" y="142">R1</text><rect class="b-client" x="392" y="116" width="64" height="46" rx="4"/><text class="s c" x="424" y="142">R2</text><rect class="b-client" x="462" y="116" width="64" height="46" rx="4"/><text class="s c" x="494" y="142">R3</text>
+        <text class="s" x="560" y="136">② FlushDeltaMemStoresOp: each flush adds a REDO file</text><text class="s" x="560" y="152">   (when the DMS is old or large, or to free WAL)</text>
+
+        <rect class="b-raft" x="20" y="196" width="90" height="46" rx="4"/><text class="s c" x="65" y="222">UNDO</text><rect class="b-ts" x="116" y="196" width="130" height="46" rx="4"/><text class="s c" x="181" y="222">base data</text>
+        <rect class="b-client" x="252" y="196" width="64" height="46" rx="4"/><text class="s c" x="284" y="222">R0'</text><rect class="b-client" x="322" y="196" width="64" height="46" rx="4"/><text class="s c" x="354" y="222">R3</text>
+        
+        <text class="s" x="560" y="216">③ MinorDeltaCompactionOp: merge R0, R1, R2 into R0'</text><text class="s" x="560" y="232">   no base data read or written; fewer files to seek</text>
+
+        <rect class="b-raft" x="20" y="276" width="90" height="46" rx="4"/><text class="s c" x="65" y="302">UNDO'</text><rect class="b-ts" x="116" y="276" width="130" height="46" rx="4"/><text class="s c" x="181" y="302">base data'</text>
+        <rect class="b-client" x="252" y="276" width="64" height="46" rx="4"/><text class="s c" x="284" y="302">R3</text>
+        <text class="s" x="560" y="296">④ MajorDeltaCompactionOp: read base + REDO, write a new</text><text class="s" x="560" y="312">   base with the changes applied, and UNDO records that</text><text class="s" x="560" y="328">   preserve the old values; may touch only some columns</text>
+        <rect class="b-disk" x="20" y="352" width="940" height="38" rx="6"/><text class="s" x="34" y="376">Row numbers never change in any step above, so these can run with no locks on the rowset. The new files replace the old ones by swapping metadata.</text>
+      </svg>
+      </div>
+      <figcaption>A major compaction can target a single column. If a workload keeps updating <code>order_status</code> and leaves the 40 other columns alone, only that column's file is rewritten. That is the payoff of storing deltas per column and per row number.</figcaption>
+    </figure>
+  </section>
+
+  <section id="compact">
+    <h2>Three kinds of compaction, side by side</h2>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 460" role="img" aria-label="Minor delta compaction merges REDO files; major delta compaction rewrites base data and creates UNDO; merging compaction combines overlapping rowsets into non-overlapping ones.">
+        <defs><marker id="f8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <g>
+          <rect class="grp" x="10" y="10" width="310" height="440" rx="8"/><text class="t" x="24" y="34">Minor delta compaction</text>
+          <text class="s" x="24" y="56">reads and writes: delta files only</text>
+          <rect class="b-ts" x="24" y="72" width="280" height="30" rx="3"/><text class="s c" x="164" y="92">base data (untouched)</text>
+          <rect class="b-client" x="24" y="110" width="280" height="24" rx="3"/><text class="s c" x="164" y="127">REDO 0</text>
+          <rect class="b-client" x="24" y="138" width="280" height="24" rx="3"/><text class="s c" x="164" y="155">REDO 1</text>
+          <rect class="b-client" x="24" y="166" width="280" height="24" rx="3"/><text class="s c" x="164" y="183">REDO 2</text>
+          <path class="ln" marker-end="url(#f8)" d="M164 196 V 226"/>
+          <rect class="b-ts" x="24" y="232" width="280" height="30" rx="3"/><text class="s c" x="164" y="252">base data (untouched)</text>
+          <rect class="b-client" x="24" y="270" width="280" height="24" rx="3"/><text class="s c" x="164" y="287">REDO 0' = 0 + 1 + 2</text>
+          <text class="t" x="24" y="324">Gains</text><text class="s" x="24" y="344">fewer files to open per read</text>
+          <text class="t" x="24" y="376">Does not</text><text class="s" x="24" y="396">move changes into base data,</text><text class="s" x="24" y="412">or shrink the history</text>
+        </g>
+        <g>
+          <rect class="grp" x="335" y="10" width="310" height="440" rx="8"/><text class="t" x="349" y="34">Major delta compaction</text>
+          <text class="s" x="349" y="56">reads and writes: base + chosen columns</text>
+          <rect class="b-raft" x="349" y="72" width="280" height="24" rx="3"/><text class="s c" x="489" y="89">UNDO</text>
+          <rect class="b-ts" x="349" y="100" width="280" height="30" rx="3"/><text class="s c" x="489" y="120">base data</text>
+          <rect class="b-client" x="349" y="134" width="280" height="24" rx="3"/><text class="s c" x="489" y="151">REDO 0</text>
+          <rect class="b-client" x="349" y="162" width="280" height="24" rx="3"/><text class="s c" x="489" y="179">REDO 1</text>
+          <path class="ln" marker-end="url(#f8)" d="M489 192 V 226"/>
+          <rect class="b-raft" x="349" y="232" width="280" height="24" rx="3"/><text class="s c" x="489" y="249">UNDO' (old + new, inverted REDO)</text>
+          <rect class="b-ts" x="349" y="260" width="280" height="30" rx="3"/><text class="s c" x="489" y="280">base data' (changes applied)</text>
+          <text class="t" x="349" y="324">Gains</text><text class="s" x="349" y="344">scans of current data apply no</text><text class="s" x="349" y="360">REDO at all</text>
+          <text class="t" x="349" y="388">Costs</text><text class="s" x="349" y="408">rewrites base columns: as much</text><text class="s" x="349" y="424">IO as the data being rewritten</text>
+        </g>
+        <g>
+          <rect class="grp" x="660" y="10" width="310" height="440" rx="8"/><text class="t" x="674" y="34">Merging (rowset) compaction</text>
+          <text class="s" x="674" y="56">reads and writes: whole rowsets</text>
+          <rect class="b-disk" x="674" y="72" width="280" height="22" rx="3"/><text class="s c" x="814" y="88">A: whole key range</text>
+          <rect class="b-disk" x="674" y="98" width="280" height="22" rx="3"/><text class="s c" x="814" y="114">B: whole key range</text>
+          <rect class="b-disk" x="674" y="124" width="280" height="22" rx="3"/><text class="s c" x="814" y="140">C: whole key range</text>
+          <path class="ln" marker-end="url(#f8)" d="M814 152 V 186"/>
+          <rect class="b-ts" x="674" y="192" width="88" height="40" rx="3"/><text class="s c" x="718" y="216">D</text>
+          <rect class="b-ts" x="768" y="192" width="88" height="40" rx="3"/><text class="s c" x="812" y="216">E</text>
+          <rect class="b-ts" x="862" y="192" width="92" height="40" rx="3"/><text class="s c" x="908" y="216">F</text>
+          <text class="s" x="674" y="256">three rowsets that spanned everything</text><text class="s" x="674" y="272">become three that each span a third.</text>
+          <text class="t" x="674" y="304">Gains</text><text class="s" x="674" y="324">lower height: fewer bloom checks</text><text class="s" x="674" y="340">and seeks; drops deleted rows;</text><text class="s" x="674" y="356">applies all deltas; rolls to ~32 MiB</text>
+          <text class="t" x="674" y="388">Costs</text><text class="s" x="674" y="408">row numbers change, so it uses the two-phase</text><text class="s" x="674" y="424">scheme from the flush section</text>
+        </g>
+      </svg>
+      </div>
+      <figcaption>Delta compactions keep row numbers, so deltas written during them stay valid. Only a merging compaction renumbers rows, which is why it needs the duplicate-and-carry-over protocol.</figcaption>
+    </figure>
+
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 340" role="img" aria-label="Timeline of a merging compaction: updates go to input rowsets during phase one; the DuplicatingRowSet sends them to both inputs and outputs in phase two; after the swap only the output receives them.">
+        <defs><marker id="f9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <path class="ln" marker-end="url(#f9)" d="M20 36 H 960"/><text class="s" x="20" y="24">time</text>
+        <rect class="grp" x="20" y="48" width="260" height="190" rx="4"/><text class="t c" x="150" y="68">Phase 1: merge a snapshot</text>
+        <rect class="grp" x="280" y="48" width="340" height="190" rx="4"/><text class="t c" x="450" y="68">Phase 2: DuplicatingRowSet</text>
+        <rect class="grp" x="620" y="48" width="340" height="190" rx="4"/><text class="t c" x="790" y="68">After the swap</text>
+        <text class="s" x="32" y="94">Snapshot iterator reads the</text><text class="s" x="32" y="112">input rowsets and writes the</text><text class="s" x="32" y="130">output.</text><text class="s" x="32" y="158">Updates: only to the inputs.</text><text class="s" x="32" y="176">Reads: only from the inputs.</text><text class="s" x="32" y="204">The output ignores changes</text><text class="s" x="32" y="222">that arrive from here on.</text>
+        <text class="s" x="292" y="94">Inputs are replaced by a wrapper that</text><text class="s" x="292" y="112">forwards each update to both the input</text><text class="s" x="292" y="130">and the output (looking up the key in</text><text class="s" x="292" y="148">the output to find its new row number).</text><text class="s" x="292" y="176">Changes missed in phase 1 are replayed</text><text class="s" x="292" y="194">onto the output. Reads still use inputs.</text><text class="s" x="292" y="222">Then the two sides are identical.</text>
+        <text class="s" x="632" y="94">Atomic swap: output rowsets replace the</text><text class="s" x="632" y="112">wrapper in the tablet. New updates go</text><text class="s" x="632" y="130">only to the output. Input files are</text><text class="s" x="632" y="148">deleted once no scan still uses them.</text><text class="s" x="632" y="176">Tablet metadata is flushed first, so a</text><text class="s" x="632" y="194">crash leaves either the old rowsets or</text><text class="s" x="632" y="212">the new ones, never half of each.</text>
+        <rect class="b-disk" x="20" y="256" width="940" height="64" rx="6"/><text class="s" x="34" y="278">Deleted rows (and, past the retention window, their history) are not copied into the output. A merging compaction is therefore also how space is reclaimed.</text><text class="s" x="34" y="298">Compaction mutates only metadata and new files, so a foreground write never waits on it. The cost is IO and CPU on the same server.</text>
+      </svg>
+      </div>
+      <figcaption>The same three phases, labelled by what updates and reads do in each. The wrapper is <code>DuplicatingRowSet</code> in <code>tablet/tablet.cc</code>.</figcaption>
+    </figure>
+  </section>
+
+  <section id="policy">
+    <h2>Which rowsets get compacted</h2>
+    <div class="prose">
+      <p>Compacting everything would give the best possible tablet and would rewrite all the data every time. The policy instead asks: <em>given a fixed IO budget, which set of rowsets lowers the tablet's average height the most?</em> It treats the total width of all rowsets as the cost of random access. Each rowset's width is the share of the key space it spans, which is also the chance that a random read has to look in it.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 440" role="img" aria-label="Five rowsets over a key axis with widths; choosing the three overlapping wide ones for compaction reduces total width from 65 to 35.">
+        <defs><marker id="f10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="t" x="20" y="24">Before: total width 20 + 15 + 5 + 15 + 10 = 65 (units of key space)</text>
+        <g>
+          <rect class="b-disk" x="140" y="40" width="500" height="26" rx="3"/><text class="s c" x="390" y="58">E (width 20)</text>
+          <rect class="b-client" x="140" y="72" width="400" height="26" rx="3"/><text class="s c" x="340" y="90">B (width 15)</text>
+          <rect class="b-client" x="400" y="104" width="220" height="26" rx="3"/><text class="s c" x="510" y="122">A (width 10)</text>
+          <rect class="b-disk" x="140" y="136" width="140" height="26" rx="3"/><text class="s c" x="210" y="154">C (5)</text>
+          
+          <rect class="b-client" x="280" y="168" width="360" height="26" rx="3"/><text class="s c" x="460" y="186">D (width 15)</text>
+        </g>
+        <text class="s" x="660" y="58">E spans the whole tablet,</text><text class="s" x="660" y="76">so every read looks in it.</text>
+        <text class="s" x="660" y="122">Wide and overlapping rowsets are</text><text class="s" x="660" y="140">the best candidates.</text>
+        <text class="t" x="20" y="238">After compacting A, B, D together into three non-overlapping rowsets: total width 20 + 5 + 5 + 5 + 5 = 40</text>
+        <g>
+          <rect class="b-disk" x="140" y="254" width="500" height="26" rx="3"/><text class="s c" x="390" y="272">E (20)</text>
+          <rect class="b-disk" x="140" y="286" width="140" height="26" rx="3"/><text class="s c" x="210" y="304">C (5)</text>
+          <rect class="b-ts" x="290" y="286" width="110" height="26" rx="3"/><text class="s c" x="345" y="304">F (5)</text>
+          <rect class="b-ts" x="410" y="286" width="110" height="26" rx="3"/><text class="s c" x="465" y="304">G (5)</text>
+          <rect class="b-ts" x="530" y="286" width="110" height="26" rx="3"/><text class="s c" x="585" y="304">H (5)</text>
+        </g>
+        <text class="s" x="660" y="272">Compacting E as well would cut width</text><text class="s" x="660" y="290">further, but it is large: the benefit per</text><text class="s" x="660" y="308">byte of IO is what the policy ranks.</text>
+        <rect class="b-master" x="20" y="340" width="940" height="84" rx="6"/><text class="t" x="34" y="364">The rules the policy follows (BudgetedCompactionPolicy)</text>
+        <text class="s" x="34" y="386">· Pick the set whose width reduction per MiB of IO is highest, within a 256 MiB budget (tablet_compaction_budget_mb), so each compaction lasts seconds, not hours.</text>
+        <text class="s" x="34" y="404">· Ignore a candidate unless it improves the score by at least 1% (compaction_minimum_improvement). Flushed output is cut into rowsets of about 32 MiB.</text>
+        
+      </svg>
+      </div>
+      <figcaption>An insert costs about <code>n × (bloom check + small chance of a key lookup)</code>, where <em>n</em> is the number of rowsets overlapping the key. That is why Kudu is happy with many small non-overlapping rowsets but unhappy with a few overlapping ones. A table whose keys always increase, like timestamps, rarely needs a merging compaction at all.</figcaption>
+    </figure>
+  </section>
+
+  <section id="mm">
+    <h2>The scheduler: Maintenance Manager</h2>
+    <div class="prose">
+      <p>Every job on this page is a <code>MaintenanceOp</code> registered by each tablet replica. A single <code>MaintenanceManager</code> per server polls them every 250 ms, asks each for fresh statistics, and starts the most valuable one when a worker thread is free. By default there is <strong>one</strong> worker thread, so the order matters.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 520" role="img" aria-label="Each tablet registers maintenance ops; the manager asks each for stats and picks one by a fixed priority order: low IO ops that free the most WAL; flushes under memory pressure; flushes when WAL replay size is too big; data GC; then the best performance improvement.">
+        <defs><marker id="f11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">OPS REGISTERED BY EVERY TABLET REPLICA</text>
+        <g>
+          <rect class="b-ts" x="20" y="34" width="200" height="44" rx="5"/><text class="t" x="32" y="54">FlushMRSOp</text><text class="s" x="32" y="70">frees RAM and WAL</text>
+          <rect class="b-ts" x="230" y="34" width="200" height="44" rx="5"/><text class="t" x="242" y="54">FlushDeltaMemStoresOp</text><text class="s" x="242" y="70">frees RAM and WAL</text>
+          <rect class="b-raft" x="440" y="34" width="150" height="44" rx="5"/><text class="t" x="452" y="54">LogGCOp</text><text class="s" x="452" y="70">deletes old WAL</text>
+          <rect class="b-client" x="600" y="34" width="170" height="44" rx="5"/><text class="t" x="612" y="54">CompactRowSetsOp</text><text class="s" x="612" y="70">merging compaction</text>
+          <rect class="b-client" x="780" y="34" width="180" height="44" rx="5"/><text class="t" x="792" y="54">MinorDeltaCompactionOp</text><text class="s" x="792" y="70">merge REDO files</text>
+          <rect class="b-client" x="20" y="90" width="200" height="44" rx="5"/><text class="t" x="32" y="110">MajorDeltaCompactionOp</text><text class="s" x="32" y="126">REDO into base data</text>
+          <rect class="b-disk" x="230" y="90" width="200" height="44" rx="5"/><text class="t" x="242" y="110">UndoDeltaBlockGCOp</text><text class="s" x="242" y="126">drops old UNDO</text>
+          <rect class="b-disk" x="440" y="90" width="200" height="44" rx="5"/><text class="t" x="452" y="110">DeletedRowsetGCOp</text><text class="s" x="452" y="126">removes fully deleted rowsets</text>
+        </g>
+        
+        <rect class="b-master" x="20" y="162" width="940" height="46" rx="6"/><text class="t" x="34" y="182">MaintenanceManager::FindBestOp</text><text class="s" x="34" y="200">every 250 ms: UpdateStats() on each op, then choose by the first rule below that has a candidate</text>
+        <text class="t" x="20" y="240">Selection order</text>
+        <g>
+          <rect class="b-raft" x="20" y="252" width="940" height="40" rx="4"/><text class="t" x="34" y="270">1</text><text class="s" x="60" y="270">A low-IO op that frees WAL: the one that frees the most log bytes (so the log never grows without bound).</text>
+          <rect class="b-raft" x="20" y="298" width="940" height="40" rx="4"/><text class="t" x="34" y="316">2</text><text class="s" x="60" y="316">Memory pressure (above 60% of the limit): the flush that frees the most RAM and WAL, so writes are not rejected.</text>
+          <rect class="b-raft" x="20" y="344" width="940" height="40" rx="4"/><text class="t" x="34" y="362">3</text><text class="s" x="60" y="362">WAL replay size at or above 1024 MB (log_target_replay_size_mb): flush, so restart time stays bounded.</text>
+          <rect class="b-disk" x="20" y="390" width="940" height="40" rx="4"/><text class="t" x="34" y="408">4</text><text class="s" x="60" y="408">Data GC (old UNDO, deleted rowsets): taken with probability 0.5 against the best performance op, so neither starves.</text>
+          <rect class="b-client" x="20" y="436" width="940" height="40" rx="4"/><text class="t" x="34" y="454">5</text><text class="s" x="60" y="454">Otherwise the op with the highest performance score (compactions, and flushes whose MemRowSet is old or large).</text>
+        </g>
+        <text class="s" x="20" y="500">An op with a priority set in the table's extra config gets its score scaled up. Ops that cannot run (locked, disabled) are skipped for that round.</text>
+      </svg>
+      </div>
+      <figcaption>The flush score is the clearest example of rule 5. Below 1024 MB of anchored RAM, a MemRowSet scores nothing until it is two minutes old (<code>flush_threshold_secs</code>), then its score rises with age, reaching 1.0 at one hour. Past 1024 MB the score is the number of extra megabytes. A large MemRowSet therefore tends to be flushed ahead of routine compactions.</figcaption>
+    </figure>
+    <p class="note">One worker thread is the default (<code>--maintenance_manager_num_threads=1</code>). A heavily written server can fall behind on compaction while that single thread is busy with flushes. Raising it to the number of data disks is the first tuning step in the Kudu scaling guide. If tablets show growing numbers of rowsets or delta files, the scheduler is the first place to look.</p>
+  </section>
+
+  <section id="gc">
+    <h2>Forgetting history</h2>
+    <div class="prose">
+      <p>UNDO records are what make time-travel reads possible, so they accumulate with every update. Kudu keeps them for a retention period, <code>--tablet_history_max_age_sec</code>, <strong>seven days</strong> by default. Everything older than the "ancient history mark" (now minus the retention) is eligible for removal. Reads at a snapshot older than that mark are refused.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 300" role="img" aria-label="Timeline with the ancient history mark at now minus seven days: UNDO older than the mark can be deleted, newer UNDO is kept, reads older than the mark are rejected.">
+        <defs><marker id="f12" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <path class="ln" marker-end="url(#f12)" d="M20 100 H 960"/><text class="s" x="20" y="86">time</text>
+        <rect class="b-disk" x="20" y="116" width="520" height="40" rx="4" style="fill-opacity:.5"/><text class="s c" x="280" y="141">UNDO records older than the mark: garbage</text>
+        <rect class="b-raft" x="540" y="116" width="400" height="40" rx="4"/><text class="s c" x="740" y="141">UNDO records within retention: kept</text>
+        <path class="life" d="M540 80 V 170" style="stroke:var(--raft);stroke-width:2;stroke-dasharray:none"/><text class="t" x="548" y="76" fill="var(--raft)">ancient history mark = now − 7 days</text>
+        <text class="t" x="940" y="190" style="text-anchor:end">now</text>
+        <rect class="b-master" x="20" y="200" width="300" height="84" rx="6"/><text class="t" x="34" y="222">Snapshot read before the mark</text><text class="s" x="34" y="242">rejected: the data to answer it</text><text class="s" x="34" y="258">may already be gone</text>
+        <rect class="b-ts" x="340" y="200" width="300" height="84" rx="6"/><text class="t" x="354" y="222">Who removes the old UNDO</text><text class="s" x="354" y="242">UndoDeltaBlockGCOp, and any merging</text><text class="s" x="354" y="258">compaction of the rowset</text>
+        <rect class="b-client" x="660" y="200" width="300" height="84" rx="6"/><text class="t" x="674" y="222">What else it frees</text><text class="s" x="674" y="242">rows deleted before the mark, whole</text><text class="s" x="674" y="258">rowsets with nothing left, tombstones</text>
+      </svg>
+      </div>
+      <figcaption>If you do not need time travel, diff scans or incremental backups, lowering the retention reduces disk use for update-heavy tables. If you do use backups, keep it longer than your backup interval, or an incremental backup cannot find the changes it needs.</figcaption>
+    </figure>
+  </section>
+
+  <section id="blocks">
+    <h2>Where the bytes live: the block manager</h2>
+    <div class="prose">
+      <p>A tablet with 30 columns and 20 rowsets has hundreds of CFiles. Putting each in its own filesystem file would be wasteful. The <code>LogBlockManager</code> appends many blocks into a few large <strong>container</strong> files. Each container is two files: a data file that holds block bytes, and a metadata file, a small log of "block X was created at offset Y" and "block X was deleted".</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 470" role="img" aria-label="A server's directories: wals, data containers each with data and metadata files, tablet-meta, consensus-meta, instance. A container's data file with blocks A to D, with B deleted by hole punching and the metadata file recording create and delete records.">
+        <defs><marker id="f13" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-disk" x="20" y="20" width="300" height="250" rx="6"/><text class="t" x="34" y="44">On a tablet server's disks</text>
+        <text class="m" x="34" y="72">wals/</text><text class="s" x="140" y="72">one directory per tablet: WAL</text>
+        <text class="m" x="34" y="98">data/</text><text class="s" x="140" y="98">block containers (shared by tablets)</text>
+        <text class="m" x="34" y="124">tablet-meta/</text><text class="s" x="140" y="124">one file per tablet</text>
+        <text class="m" x="34" y="150">consensus-meta/</text><text class="s" x="140" y="150">term, vote, config</text>
+        <text class="m" x="34" y="176">instance</text><text class="s" x="140" y="176">this server's uuid</text>
+        <text class="s" x="34" y="208">With several data directories, a tablet's</text><text class="s" x="34" y="224">files spread across a few of them (a "disk</text><text class="s" x="34" y="240">group"); the WAL can sit on its own disk.</text>
+
+        <text class="t" x="350" y="40">One container in data/</text>
+        <text class="s" x="350" y="60"><tspan class="m">1a2b….data</tspan>  (append-only; preallocated 32 MiB at a time; up to 10 GiB)</text>
+        <rect class="b-ts" x="350" y="70" width="120" height="44" rx="3"/><text class="t c" x="410" y="96">block A</text>
+        <rect class="b-disk" x="470" y="70" width="110" height="44" rx="3" style="stroke-dasharray:5 3;fill-opacity:.4"/><text class="s c" x="525" y="96">hole (B)</text>
+        <rect class="b-ts" x="580" y="70" width="140" height="44" rx="3"/><text class="t c" x="650" y="96">block C</text>
+        <rect class="b-ts" x="720" y="70" width="110" height="44" rx="3"/><text class="t c" x="775" y="96">block D</text>
+        <rect class="b-disk" x="830" y="70" width="130" height="44" rx="3" style="fill-opacity:.4"/><text class="s c" x="895" y="96">free space</text>
+        <text class="s" x="350" y="144"><tspan class="m">1a2b….metadata</tspan>  (a log of small records)</text>
+        <g>
+          <rect class="b-client" x="350" y="154" width="130" height="34" rx="3"/><text class="m c" x="415" y="176">CREATE A @0</text>
+          <rect class="b-client" x="484" y="154" width="130" height="34" rx="3"/><text class="m c" x="549" y="176">CREATE B @…</text>
+          <rect class="b-client" x="618" y="154" width="130" height="34" rx="3"/><text class="m c" x="683" y="176">CREATE C @…</text>
+          <rect class="b-raft" x="752" y="154" width="130" height="34" rx="3"/><text class="m c" x="817" y="176">DELETE B</text>
+        </g>
+        <text class="s" x="350" y="216">Creating a block: write data first, then append the CREATE record. Deleting: append DELETE first,</text><text class="s" x="350" y="232">then free the space (hole punching if the filesystem supports it). A crash between the two steps</text><text class="s" x="350" y="248">leaves garbage that the next start-up cleans, never a record pointing at missing data.</text>
+
+        <rect class="b-master" x="20" y="296" width="460" height="150" rx="6"/><text class="t" x="34" y="320">Reading a block</text><text class="s" x="34" y="342">Block ids live in the tablet metadata. The block manager</text><text class="s" x="34" y="358">maps an id to (container, offset, length); open data files</text><text class="s" x="34" y="374">are kept in a file cache.</text><text class="s" x="34" y="396">Decoded CFile blocks go into the block cache: an LRU of</text><text class="s" x="34" y="412">512 MB by default (block_cache_capacity_mb).</text>
+        <rect class="b-client" x="500" y="296" width="460" height="150" rx="6"/><text class="t" x="514" y="320">Why containers make sense</text><text class="s" x="514" y="342">· far fewer files and directory entries per tablet</text><text class="s" x="514" y="362">· every block is written once, sequentially, and never edited</text><text class="s" x="514" y="382">· a flush can write many blocks into one container and sync once</text><text class="s" x="514" y="402">· deletion is cheap: a log record, then space reclaimed later</text><text class="s" x="514" y="422">· metadata files can be compacted when most of their blocks are dead</text>
+      </svg>
+      </div>
+      <figcaption>The block manager is also the layer that notices failed disks: an IO error on a data directory marks it failed, and the tablets that use it are stopped and re-replicated, as in Part 4. Directories are in <code>fs/dir_manager.cc</code> and <code>fs/data_dirs.cc</code>.</figcaption>
+    </figure>
+  </section>
+
+  <section id="tune">
+    <h2>Knobs worth knowing</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Flag</th><th>Default</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><code>--maintenance_manager_num_threads</code></td><td>1</td><td>Concurrent flushes and compactions on the server</td></tr>
+          <tr><td><code>--maintenance_manager_polling_interval_ms</code></td><td>250</td><td>How often the scheduler looks for work</td></tr>
+          <tr><td><code>--flush_threshold_mb</code></td><td>1024</td><td>MemRowSet size at which its flush gets urgent</td></tr>
+          <tr><td><code>--flush_threshold_secs</code></td><td>120</td><td>Age after which a MemRowSet starts to score for flushing</td></tr>
+          <tr><td><code>--log_target_replay_size_mb</code></td><td>1024</td><td>WAL kept for replay before flushing is forced</td></tr>
+          <tr><td><code>--memory_pressure_percentage</code></td><td>60</td><td>Memory use at which flushes beat other work</td></tr>
+          <tr><td><code>--tablet_compaction_budget_mb</code></td><td>256</td><td>IO budget of one rowset compaction</td></tr>
+          <tr><td><code>--budgeted_compaction_target_rowset_size</code></td><td>32 MiB</td><td>Size at which output rowsets roll over</td></tr>
+          <tr><td><code>--tablet_delta_store_minor_compact_max</code></td><td>1000</td><td>Most delta files merged by one minor compaction</td></tr>
+          <tr><td><code>--tablet_history_max_age_sec</code></td><td>604800</td><td>Retention of UNDO history (7 days)</td></tr>
+          <tr><td><code>--tablet_bloom_target_fp_rate</code></td><td>0.0001</td><td>Bloom filter false positive rate</td></tr>
+          <tr><td><code>--cfile_default_block_size</code></td><td>262144</td><td>Size of a CFile data block</td></tr>
+          <tr><td><code>--cfile_default_compression_codec</code></td><td>no_compression</td><td>Compression when a column does not set one</td></tr>
+          <tr><td><code>--block_cache_capacity_mb</code></td><td>512</td><td>Block cache size</td></tr>
+          <tr><td><code>--log_container_max_size</code></td><td>10 GiB</td><td>Largest container data file</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Symptoms and where to look. Writes rejected under memory pressure: flushes are not keeping up, check the maintenance thread count and disk speed. Reads slowing over time: look at rowset count and delta file counts per tablet in the web UI's tablet page. Disk use not shrinking after deletes or updates: UNDO retention, and whether merging compaction ran.</p>
+  </section>
+
+  <section id="map">
+    <h2>Where to find it in the source</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Topic</th><th>Look at (in <code>src/kudu/</code>)</th></tr></thead>
+        <tbody>
+          <tr><td>Tablet, flush, compaction driver</td><td><code>tablet/tablet.cc</code>: <code>FlushUnlocked</code>, <code>DoMergeCompactionOrFlush</code>, <code>ReupdateMissedDeltas</code></td></tr>
+          <tr><td>DiskRowSet read and write</td><td><code>tablet/diskrowset.cc</code> (<code>DiskRowSetWriter</code>, <code>DiskRowSet</code>)</td></tr>
+          <tr><td>Deltas</td><td><code>tablet/deltamemstore.cc</code>, <code>deltafile.cc</code>, <code>delta_tracker.cc</code>, <code>delta_compaction.cc</code></td></tr>
+          <tr><td>Rowset interval tree</td><td><code>tablet/rowset_tree.cc</code></td></tr>
+          <tr><td>Compaction policy</td><td><code>tablet/compaction_policy.cc</code>, <code>compaction.cc</code></td></tr>
+          <tr><td>Maintenance ops</td><td><code>tablet/tablet_mm_ops.cc</code>, <code>tablet/tablet_replica_mm_ops.cc</code></td></tr>
+          <tr><td>Scheduler</td><td><code>util/maintenance_manager.cc</code> (<code>FindBestOp</code>)</td></tr>
+          <tr><td>Column files</td><td><code>cfile/cfile_writer.cc</code>, <code>cfile_reader.cc</code>, <code>bshuf_block.cc</code>, <code>binary_dict_block.cc</code>, <code>index_btree.cc</code>, <code>bloomfile.cc</code></td></tr>
+          <tr><td>Block manager</td><td><code>fs/log_block_manager.cc</code>, <code>fs/fs_manager.cc</code></td></tr>
+          <tr><td>Design notes</td><td><code>docs/design-docs/tablet.md</code>, <code>cfile.md</code>, <code>compaction.md</code>, <code>compaction-policy.md</code>, <code>triggering-maintenance-ops.md</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>The design notes are mostly current for this part. The one notable difference is that the notes talk about flush thresholds in general terms, while the numbers above come from the flag definitions in the code.</p>
+      <p><strong>Next part:</strong> scans: how a scan token is built, how predicates are pushed to the rowsets, and how a reader combines the MemRowSet, base data, UNDO and REDO into one consistent snapshot.</p>
+    </div>
+  </section>
+</main>
