@@ -1,0 +1,298 @@
+<title>Kudu Backup and Restore Tutorial</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column; wide figures scroll inside their own frame on phones.
+   Palette is keyed to the roles in the system: client (ochre), master (indigo), tablet server (teal), Raft/WAL (rust), disk (slate). */
+:root {
+  --bg: #f4f7f8; --surf: #ffffff; --fg: #14212b; --muted: #55646e; --line: #d0d9df; --line2: #8fa0ab;
+  --client: #a9680f; --client-t: #fbeed6;
+  --master: #4a4db8; --master-t: #e6e7fa;
+  --ts: #0d7566; --ts-t: #d9f1ed;
+  --raft: #bb4a22; --raft-t: #fae3d9;
+  --disk: #52646f; --disk-t: #e6ecef;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+    --client: #e3ad50; --client-t: #3a2f17;
+    --master: #a1a3f5; --master-t: #25284d;
+    --ts: #4fc9b4; --ts-t: #11322d;
+    --raft: #f2905f; --raft-t: #3d2218;
+    --disk: #a3b4bf; --disk-t: #22323c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+  --client: #e3ad50; --client-t: #3a2f17;
+  --master: #a1a3f5; --master-t: #25284d;
+  --ts: #4fc9b4; --ts-t: #11322d;
+  --raft: #f2905f; --raft-t: #3d2218;
+  --disk: #a3b4bf; --disk-t: #22323c;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.65 var(--body);
+  padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.prose { max-width: 68ch; display: flex; flex-direction: column; gap: 12px; }
+p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.1rem; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+code { font: 500 .88em var(--mono); background: var(--disk-t); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--master); }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { background: var(--surf); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { font-size: .92rem; color: var(--muted); max-width: 78ch; }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.role { background: var(--surf); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role h3 { color: var(--c); }
+.role p, .role li { font-size: .95rem; }
+.role ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; max-width: 76ch; }
+.note { border-left: 3px solid var(--raft); padding: 4px 0 4px 14px; color: var(--muted); max-width: 68ch; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font: 500 13px var(--mono); text-decoration: none; color: var(--fg); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+/* SVG vocabulary */
+svg text { font-family: var(--body); fill: var(--fg); font-size: 13px; }
+svg .t { font-weight: 600; }
+svg .s { font-size: 11.5px; fill: var(--muted); }
+svg .m { font-family: var(--mono); font-size: 11.5px; }
+svg .h { paint-order: stroke; stroke: var(--surf); stroke-width: 5px; stroke-linejoin: round; }
+svg .c { text-anchor: middle; }
+svg .e { text-anchor: end; }
+svg .box { fill: var(--surf); stroke: var(--line2); stroke-width: 1.4; }
+svg .grp { fill: none; stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .b-client { fill: var(--client-t); stroke: var(--client); stroke-width: 1.5; }
+svg .b-master { fill: var(--master-t); stroke: var(--master); stroke-width: 1.5; }
+svg .b-ts { fill: var(--ts-t); stroke: var(--ts); stroke-width: 1.5; }
+svg .b-raft { fill: var(--raft-t); stroke: var(--raft); stroke-width: 1.5; }
+svg .b-disk { fill: var(--disk-t); stroke: var(--disk); stroke-width: 1.5; }
+svg .solid-ts { fill: var(--ts); stroke: var(--ts); }
+svg .solid-ts + text, svg text.on { fill: var(--surf); }
+svg .ln { fill: none; stroke: currentColor; stroke-width: 1.5; }
+svg .ln-r { fill: none; stroke: var(--raft); stroke-width: 1.6; stroke-dasharray: 6 4; }
+svg .ln-d { fill: none; stroke: var(--line2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+svg .life { stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 3 5; }
+</style>
+<main>
+  <header class="prose">
+    <span class="eyebrow">Learning Kudu · Part 12</span>
+    <h1>Backup and restore</h1>
+    <p class="lede">Kudu's supported backup is <strong>logical</strong>: a Spark job reads a table through the normal scan path and writes Parquet files, and a second Spark job writes them back. There is no built-in tool that copies tablet files from a running cluster. This part shows how the backup job gets a consistent view, how incremental backups chain together, how restore replays the chain, and what the only physical option looks like.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#overview">Overview</a><a href="#snapshot">One consistent snapshot</a><a href="#chain">Full and incremental</a><a href="#layout">What is on disk</a><a href="#restore">Restore</a><a href="#history">History retention</a><a href="#tools">Tools and flags</a><a href="#physical">Physical copies</a><a href="#src">Source map</a>
+    </nav>
+  </header>
+
+  <section id="overview">
+    <h2>The big picture</h2>
+    <div class="prose">
+      <p>Backup reuses machinery from earlier parts instead of adding new server features. The <strong>scan tokens</strong> of part 8 split a table into one unit of work per tablet. The <strong>snapshot read mode</strong> gives every unit the same timestamp, so the copy is consistent across tablets. The <strong>diff scan</strong> (a scan between two timestamps that also reports deleted rows) gives incremental changes. The only server-side requirement is that tablets keep history long enough (part 6, history GC).</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 360" role="img" aria-label="Spark driver builds scan tokens; executors scan tablets at one snapshot timestamp and write Parquet part files and a metadata file under the root path; restore reads them back and writes to Kudu.">
+        <defs><marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="grp" x="20" y="14" width="940" height="150" rx="10"/><text class="s" x="34" y="34">Backup: KuduBackup (spark-submit)</text>
+        <rect class="b-client" x="40" y="52" width="180" height="90" rx="6"/><text class="t c" x="130" y="80">Spark driver</text><text class="s c" x="130" y="100">chooses full / incremental</text><text class="s c" x="130" y="116">builds scan tokens</text>
+        <rect class="b-ts" x="310" y="52" width="190" height="90" rx="6"/><text class="t c" x="405" y="80">Executors</text><text class="s c" x="405" y="100">one task per tablet</text><text class="s c" x="405" y="116">same snapshot timestamp</text>
+        <rect class="b-raft" x="580" y="52" width="170" height="90" rx="6"/><text class="t c" x="665" y="80">Kudu tablets</text><text class="s c" x="665" y="100">snapshot or diff scan</text><text class="s c" x="665" y="116">(closest replica)</text>
+        <rect class="b-disk" x="810" y="52" width="130" height="90" rx="6"/><text class="t c" x="875" y="80">rootPath</text><text class="s c" x="875" y="100">HDFS, S3, ...</text><text class="s c" x="875" y="116">Parquet + JSON</text>
+        <path class="ln" marker-end="url(#b1)" d="M220 97 H 308"/><text class="s c" x="264" y="88">tokens</text>
+        <path class="ln" marker-end="url(#b1)" d="M500 85 H 578"/><path class="ln-d" marker-end="url(#b1)" d="M578 112 H 502"/>
+        <path class="ln" marker-end="url(#b1)" d="M405 144 C 405 190, 700 190, 808 125"/><text class="s c" x="640" y="186">part-*.parquet, then .kudu-metadata.json</text>
+
+        <rect class="grp" x="20" y="200" width="940" height="140" rx="10"/><text class="s" x="34" y="220">Restore: KuduRestore (spark-submit)</text>
+        <rect class="b-disk" x="40" y="238" width="180" height="80" rx="6"/><text class="t c" x="130" y="266">rootPath</text><text class="s c" x="130" y="286">read metadata, pick a chain</text>
+        <rect class="b-client" x="310" y="238" width="190" height="80" rx="6"/><text class="t c" x="405" y="266">Spark driver</text><text class="s c" x="405" y="286">create table from metadata</text>
+        <rect class="b-ts" x="580" y="238" width="170" height="80" rx="6"/><text class="t c" x="665" y="266">Executors</text><text class="s c" x="665" y="286">upsert / delete rows</text>
+        <rect class="b-raft" x="810" y="238" width="130" height="80" rx="6"/><text class="t c" x="875" y="266">Kudu</text><text class="s c" x="875" y="286">restored table</text>
+        <path class="ln" marker-end="url(#b1)" d="M220 278 H 308"/><path class="ln" marker-end="url(#b1)" d="M500 278 H 578"/><path class="ln" marker-end="url(#b1)" d="M750 278 H 808"/>
+      </svg>
+      </div>
+      <figcaption>Everything runs in Spark, so the cluster running the job needs network access to both Kudu and the backup storage. The <code>rootPath</code> may be any Spark-compatible filesystem path. The jobs are marked unstable and private in the source: the file layout is an internal detail that may change between releases.</figcaption>
+    </figure>
+  </section>
+
+  <section id="snapshot">
+    <h2>One consistent snapshot</h2>
+    <div class="prose">
+      <p>For each table the driver builds scan tokens with the read mode <code>READ_AT_SNAPSHOT</code>, <code>cacheBlocks(false)</code> (a backup should not evict hot data from the block cache) and <code>CLOSEST_REPLICA</code> selection, so a task can read from a nearby follower. The snapshot time is <code>--timestampMs</code> (default: now), converted to a hybrid timestamp. Because every tablet is read at the <em>same</em> timestamp, the backup is a point-in-time image even though the tablets are copied at different moments and the table keeps taking writes.</p>
+      <p>Spark gets a preferred location for each task: the replica hosts of the tablet, or the leader's host only if <code>--scanLeaderOnly</code> is set. Tasks keep their scanners alive while Spark is busy (<code>--keepAlivePeriodMs</code>), and results are written as Parquet.</p>
+    </div>
+  </section>
+
+  <section id="chain">
+    <h2>Full and incremental backups</h2>
+    <div class="prose">
+      <p>Each backup records a time range in its metadata: <code>from_ms</code> and <code>to_ms</code>. A <strong>full</strong> backup has <code>from_ms = 0</code>. An <strong>incremental</strong> backup starts where the previous one ended: its <code>from_ms</code> equals the previous backup's <code>to_ms</code>, and it is read with a diff scan between the two timestamps. The backups form a graph (<code>BackupGraph</code>) keyed by <code>from_ms</code>, and a chain is a path from a full backup through the increments.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 330" role="img" aria-label="Timeline of a full backup, three incrementals, and a second full backup, each as a box from from_ms to to_ms; the restore path is highlighted.">
+        <defs><marker id="b2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <path class="ln" d="M40 60 H 940" marker-end="url(#b2)"/><text class="s" x="40" y="46">time (ms)</text>
+        <g class="s c"><text x="40" y="82">0</text><text x="200" y="82">t1</text><text x="360" y="82">t2</text><text x="520" y="82">t3</text><text x="680" y="82">t4</text></g>
+        <path class="life" d="M200 60 V 280"/><path class="life" d="M360 60 V 280"/><path class="life" d="M520 60 V 280"/><path class="life" d="M680 60 V 280"/>
+        <rect class="b-ts" x="40" y="100" width="160" height="44" rx="5"/><text class="t c" x="120" y="120">full #1</text><text class="s c" x="120" y="136">from 0, to t1</text>
+        <rect class="b-master" x="200" y="150" width="160" height="44" rx="5"/><text class="t c" x="280" y="170">incremental</text><text class="s c" x="280" y="186">from t1, to t2</text>
+        <rect class="b-master" x="360" y="200" width="160" height="44" rx="5"/><text class="t c" x="440" y="220">incremental</text><text class="s c" x="440" y="236">from t2, to t3</text>
+        <rect class="b-ts" x="520" y="250" width="160" height="44" rx="5"/><text class="t c" x="600" y="270">full #2 (forceFull)</text><text class="s c" x="600" y="286">from 0, to t4</text>
+                <text class="s" x="710" y="120">A full backup is the root of a chain.</text>
+        <text class="s" x="710" y="150">The next incremental starts at the</text><text class="s" x="710" y="166">previous backup's to_ms.</text>
+        <text class="s" x="710" y="196">Restore uses the chain whose last</text><text class="s" x="710" y="212">backup is most recent; ties go to the</text><text class="s" x="710" y="228">chain with fewer incrementals.</text>
+      </svg>
+      </div>
+      <figcaption>Illustrative. The rule for the next backup's base (<code>backupBase</code>): take the path whose full backup is most recent, then the one with the latest <code>to_ms</code>, then the lowest "weight" (a full counts 0, an incremental 1). While a new full backup is still running, incrementals keep extending the old chain, and switch once the new full completes.</figcaption>
+    </figure>
+    <div class="prose">
+      <p><strong>How the job decides.</strong> With <code>--forceFull</code> it takes a full backup. If you pass <code>--fromMs</code> it takes an incremental from that time. Otherwise it reads the existing metadata under <code>rootPath</code> (found by <em>table ID</em>, so a renamed table is still linked), and if a full backup exists it starts an incremental from the base's <code>to_ms</code>; if none exists it takes a full one.</p>
+      <p><strong>What an incremental contains.</strong> The diff scan returns changed rows plus an <code>is_deleted</code> flag. The job turns it into a <code>RowAction</code> column: <code>DELETE</code> (1) for deleted rows and <code>UPSERT</code> (0) for everything else. The comment in the code says it does not know whether a changed row was inserted or updated, so it records an upsert. A full backup has no action column.</p>
+      <p><strong>Failure safety.</strong> Data files are written first and the metadata file is written <em>last</em>. A backup without its metadata file is ignored when linking and restoring, so a failed run leaves no half-visible backup. The data path includes the timestamp and must not already exist (<code>SaveMode.ErrorIfExists</code>).</p>
+    </div>
+  </section>
+
+  <section id="layout">
+    <h2>What is on disk</h2>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 330" role="img" aria-label="Directory tree under the root path with a folder per table and per backup, and the main fields of the metadata file.">
+        <rect class="b-disk" x="20" y="14" width="440" height="296" rx="8"/>
+        <text class="m" x="40" y="44">/&lt;rootPath&gt;/</text>
+        <text class="m" x="60" y="72">&lt;tableId&gt;-&lt;tableName&gt;/</text><text class="s" x="330" y="72">name is URL-encoded</text>
+        <text class="m" x="80" y="100">&lt;backup-id&gt;/</text><text class="s" x="230" y="100">one per backup run</text>
+        <text class="m" x="100" y="128">part-00000-….parquet</text><text class="s" x="320" y="128">one per Kudu partition</text>
+        <text class="m" x="100" y="152">part-00001-….parquet</text>
+        <text class="m" x="100" y="176">.kudu-metadata.json</text><text class="s" x="320" y="176">written last</text>
+        <text class="m" x="80" y="214">&lt;next-backup-id&gt;/</text>
+        <text class="m" x="100" y="238">part-*.parquet</text>
+        <text class="m" x="100" y="262">.kudu-metadata.json</text>
+        <text class="s" x="40" y="292">Incremental part files carry an extra row-action column at the end.</text>
+        <rect class="b-master" x="500" y="14" width="460" height="296" rx="8"/>
+        <text class="t" x="520" y="42">.kudu-metadata.json (TableMetadataPB)</text>
+        <g class="m"><text x="520" y="72">from_ms, to_ms</text><text x="520" y="96">data_format ("parquet")</text><text x="520" y="120">table_name, table_id</text><text x="520" y="144">num_replicas</text><text x="520" y="168">columns[]  (type, encoding, default, ...)</text><text x="520" y="192">column_ids  (validation only)</text><text x="520" y="216">partitions  (hash and range schema)</text><text x="520" y="240">tablets  (validation only)</text><text x="520" y="264">table_owner, table_comment</text></g>
+        <text class="s" x="520" y="292">Enough to recreate the table, link backups by time, and detect drops.</text>
+      </svg>
+      </div>
+      <figcaption>From <code>docs/administration.adoc</code> and <code>backup.proto</code>. The only data format currently supported is Parquet. The administration guide calls the layout an internal detail, so read it for understanding, not as an interface to build on.</figcaption>
+    </figure>
+  </section>
+
+  <section id="restore">
+    <h2>Restore: replaying the chain</h2>
+    <div class="prose">
+      <p>For each table the restore job reads all backup metadata under <code>rootPath</code>, keeps those with <code>to_ms ≤ --timestampMs</code> (default: now), and chooses a <strong>restore path</strong>: the chain with the most recent end time, then the fewest incrementals. It then applies the backups in order.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 300" role="img" aria-label="Restore steps: choose the chain, create the table from the last schema, upsert the full backup, apply each incremental as upserts and deletes.">
+        <defs><marker id="b3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-disk" x="20" y="30" width="200" height="110" rx="8"/><text class="t" x="36" y="56">1. Choose a chain</text><text class="s" x="36" y="78">latest to_ms ≤ timestampMs,</text><text class="s" x="36" y="94">then fewest incrementals</text>
+        <rect class="b-master" x="250" y="30" width="220" height="110" rx="8"/><text class="t" x="266" y="56">2. Create the table</text><text class="s" x="266" y="78">uses the schema of the </text><text class="s" x="266" y="94">last backup in the chain,</text><text class="s" x="266" y="110">and --tableSuffix if given</text>
+        <rect class="b-ts" x="500" y="30" width="220" height="110" rx="8"/><text class="t" x="516" y="56">3. Apply the full backup</text><text class="s" x="516" y="78">every row becomes an UPSERT</text><text class="s" x="516" y="94">(default action value)</text>
+        <rect class="b-ts" x="750" y="30" width="210" height="110" rx="8"/><text class="t" x="766" y="56">4. Each incremental</text><text class="s" x="766" y="78">UPSERT rows, DELETE rows</text><text class="s" x="766" y="94">(DELETE_IGNORE on retry)</text>
+        <path class="ln" marker-end="url(#b3)" d="M220 85 H 248"/><path class="ln" marker-end="url(#b3)" d="M470 85 H 498"/><path class="ln" marker-end="url(#b3)" d="M720 85 H 748"/>
+        <rect class="grp" x="20" y="170" width="940" height="110" rx="8"/><text class="t" x="36" y="196">Details the code takes care of</text>
+        <text class="s" x="36" y="220">• Many tablets: a table is created with its first range partition and the rest are added one by one with alters, because creation is limited</text><text class="s" x="46" y="236">(60 tablets per server by default, <tspan class="m">--max_create_tablets_per_ts</tspan>).</text>
+        <text class="s" x="36" y="256">• Schema changes between backups: columns dropped or renamed since an older backup are adjusted using column IDs before rows are written.</text>
+        <text class="s" x="36" y="272">• Rows from a range partition that was dropped between backups are filtered out, since no tablet covers them.</text>
+      </svg>
+      </div>
+      <figcaption>Writes use ordinary Kudu sessions, so a restore is as fast as a bulk load. Failed tasks are retried by Spark; that is why deletes tolerate "not found" (<code>DELETE_IGNORE</code>).</figcaption>
+    </figure>
+    <div class="prose">
+      <p><strong>Useful restore options:</strong> <code>--tableSuffix</code> restores next to the live table, <code>--createTables=false</code> loads into an existing table, <code>--newDatabaseName</code> and <code>--removeImpalaPrefix</code> adjust names of Impala-managed tables, and <code>--restoreOwner</code> controls whether the table owner is restored.</p>
+      <p><strong>Known limits</strong> stated in the docs and code comments: restoring tables with non-unique primary keys / auto-incrementing columns is not supported yet; if a restore fails partway, the table may be left created and a rerun then fails until the table is deleted or the suffix changed (KUDU-2832 in the source).</p>
+    </div>
+  </section>
+
+  <section id="history">
+    <h2>Why history retention matters</h2>
+    <div class="prose">
+      <p>A snapshot read at timestamp T needs the data as it was at T, and a diff scan needs everything that changed since the previous backup. Tablets keep that history only for <code>--tablet_history_max_age_sec</code>, which defaults to 604,800 seconds (seven days) since Kudu 1.10. The flag description is explicit: it covers history needed for diff scans and incremental backups, and reads at a snapshot older than this age are rejected.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 230" role="img" aria-label="Timeline: the ancient history mark trails now by the retention window; a backup whose from time is before the mark cannot be taken as incremental.">
+        <defs><marker id="b4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <path class="ln" d="M40 120 H 940" marker-end="url(#b4)"/>
+        <rect class="b-raft" x="40" y="100" width="380" height="40" rx="4" style="opacity:.55"/><text class="s c" x="230" y="92">history GCed: cannot be read</text>
+        <rect class="b-ts" x="420" y="100" width="480" height="40" rx="4"/><text class="s c" x="660" y="92">retained: --tablet_history_max_age_sec (7 days default)</text>
+        <path class="life" d="M420 60 V 160"/><text class="s c" x="420" y="50">ancient history mark</text>
+        <path class="life" d="M900 60 V 160"/><text class="s c" x="900" y="50">now</text>
+        <circle cx="520" cy="120" r="6" fill="var(--master)"/><text class="s c" x="520" y="180">last backup (to_ms)</text><text class="s c" x="520" y="196">next incremental can start here</text>
+        <circle cx="300" cy="120" r="6" fill="var(--raft)"/><text class="s c" x="300" y="180">an old to_ms</text><text class="s c" x="300" y="196">before the mark: rejected, take a full backup</text>
+      </svg>
+      </div>
+      <figcaption>So take incrementals more often than the retention window. If you wait too long, the chain is broken and you must run with <code>--forceFull</code>. Raising the retention keeps more UNDO data on disk, which is the price of safe incrementals. Also note the history design doc: rows deleted <em>and</em> older than the mark can be dropped by merging compactions, so very old deletes are not reproducible from the cluster.</figcaption>
+    </figure>
+  </section>
+
+  <section id="tools">
+    <h2>Commands and flags</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Where</th><th>Flag</th><th>Meaning (default)</th></tr></thead>
+        <tbody>
+          <tr><td>KuduBackup</td><td><code>--rootPath</code>, <code>--kuduMasterAddresses</code></td><td>output location; masters (localhost)</td></tr>
+          <tr><td>KuduBackup</td><td><code>--forceFull</code>, <code>--fromMs</code></td><td>force a full backup; or start an incremental from a given time</td></tr>
+          <tr><td>KuduBackup</td><td><code>--timestampMs</code></td><td>snapshot time (now)</td></tr>
+          <tr><td>KuduBackup</td><td><code>--scanBatchSize</code>, <code>--scanRequestTimeoutMs</code>, <code>--keepAlivePeriodMs</code></td><td>scan tuning (batch default 20 MiB)</td></tr>
+          <tr><td>KuduBackup</td><td><code>--scanLeaderOnly</code>, <code>--format</code>, <code>--failOnFirstError</code></td><td>read only leaders (false); file format (parquet); stop at the first failing table</td></tr>
+          <tr><td>KuduRestore</td><td><code>--createTables</code>, <code>--tableSuffix</code>, <code>--timestampMs</code></td><td>create tables (true); suffix for new names; latest backup to consider (now)</td></tr>
+          <tr><td>KuduRestore</td><td><code>--removeImpalaPrefix</code>, <code>--newDatabaseName</code>, <code>--restoreOwner</code></td><td>name and owner handling</td></tr>
+          <tr><td>KuduBackupCLI <code>list</code></td><td><code>--rootPath</code>, <code>--type</code>, <code>--format</code></td><td>show the backups found</td></tr>
+          <tr><td>KuduBackupCLI <code>clean</code></td><td><code>--expirationAgeDays</code>, <code>--dryRun</code>, <code>--verbose</code></td><td>delete expired backups, but never the current restore path</td></tr>
+          <tr><td>tablet server</td><td><code>--tablet_history_max_age_sec</code></td><td>history kept for snapshots and diffs (604800)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p><strong>Tips from the admin guide.</strong> Generate the table list with <code>kudu table list &lt;masters&gt; | grep "^my_db\."</code> and save it for restore time. Spark tuning: roughly 1 GiB of executor memory per 50 columns for very wide tables; limit restore concurrency if Spark far outscales Kudu. <code>clean</code> deletes from the newest backup of an expired chain backward, so a crash leaves a usable prefix.</p>
+    </div>
+  </section>
+
+  <section id="physical">
+    <h2>The physical option, and its limits</h2>
+    <div class="prose">
+      <p>The guide says Kudu has no built-in physical backup, but a node can be copied by hand. It is a cold procedure: <strong>stop all Kudu processes in the cluster</strong> (so tablets are not re-replicated), copy the WAL, metadata and data directories preserving attributes and sparseness, and start again. Restoring means deleting the node's directories and putting the copy back. The warnings are important: the node must be offline or the copy will be inconsistent, and hostnames are embedded in the on-disk data, so a copy cannot be restored onto a different machine.</p>
+      <p>That makes it a node-level safety net, not a way to clone or migrate tables. For disaster recovery of tables, use the logical backup, ideally with the backup storage on a different system than the cluster. Remember replication (Raft) protects against server loss, not against someone running <code>DROP TABLE</code>; backups do.</p>
+    </div>
+  </section>
+
+  <section id="src">
+    <h2>Where to read the code</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>File</th><th>What is in it</th></tr></thead>
+        <tbody>
+          <tr><td><code>docs/administration.adoc</code> (Backup and Restore)</td><td>the operator guide, examples and troubleshooting</td></tr>
+          <tr><td><code>java/kudu-backup/.../KuduBackup.scala</code></td><td>per-table logic: full vs incremental, write data then metadata</td></tr>
+          <tr><td><code>java/kudu-backup/.../KuduBackupRDD.scala</code></td><td>scan tokens, snapshot or diff scan, row action translation</td></tr>
+          <tr><td><code>java/kudu-backup/.../KuduRestore.scala</code></td><td>restore: table creation, schema adjustment, upsert and delete</td></tr>
+          <tr><td><code>java/kudu-backup/.../Options.scala</code></td><td>all backup and restore flags</td></tr>
+          <tr><td><code>java/kudu-backup-common/.../BackupGraph.scala</code></td><td>chains, <code>backupBase</code>, <code>restorePath</code></td></tr>
+          <tr><td><code>java/kudu-backup-common/.../BackupIO.scala</code>, <code>TableMetadata.scala</code>, <code>backup.proto</code></td><td>paths, reading and writing metadata</td></tr>
+          <tr><td><code>java/kudu-backup-tools/</code></td><td><code>list</code> and <code>clean</code> commands</td></tr>
+          <tr><td><code>docs/design-docs/tablet-history-gc.md</code></td><td>why history is kept and when it is removed</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
