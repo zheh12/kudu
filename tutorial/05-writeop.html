@@ -1,0 +1,578 @@
+<title>Kudu WriteOp Trace</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column; wide figures scroll inside their own frame on phones.
+   Palette is keyed to the roles in the system: client (ochre), master (indigo), tablet server (teal), Raft/WAL (rust), disk (slate). */
+:root {
+  --bg: #f4f7f8; --surf: #ffffff; --fg: #14212b; --muted: #55646e; --line: #d0d9df; --line2: #8fa0ab;
+  --client: #a9680f; --client-t: #fbeed6;
+  --master: #4a4db8; --master-t: #e6e7fa;
+  --ts: #0d7566; --ts-t: #d9f1ed;
+  --raft: #bb4a22; --raft-t: #fae3d9;
+  --disk: #52646f; --disk-t: #e6ecef;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+    --client: #e3ad50; --client-t: #3a2f17;
+    --master: #a1a3f5; --master-t: #25284d;
+    --ts: #4fc9b4; --ts-t: #11322d;
+    --raft: #f2905f; --raft-t: #3d2218;
+    --disk: #a3b4bf; --disk-t: #22323c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1920; --surf: #15252e; --fg: #e5edf1; --muted: #9ab0bc; --line: #2a3b46; --line2: #5f7686;
+  --client: #e3ad50; --client-t: #3a2f17;
+  --master: #a1a3f5; --master-t: #25284d;
+  --ts: #4fc9b4; --ts-t: #11322d;
+  --raft: #f2905f; --raft-t: #3d2218;
+  --disk: #a3b4bf; --disk-t: #22323c;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.65 var(--body);
+  padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.prose { max-width: 68ch; display: flex; flex-direction: column; gap: 12px; }
+p { margin: 0; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.1rem; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+code { font: 500 .88em var(--mono); background: var(--disk-t); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--master); }
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.frame { background: var(--surf); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--fg); }
+figcaption { font-size: .92rem; color: var(--muted); max-width: 78ch; }
+.roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.role { background: var(--surf); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role h3 { color: var(--c); }
+.role p, .role li { font-size: .95rem; }
+.role ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; max-width: 76ch; }
+.note { border-left: 3px solid var(--raft); padding: 4px 0 4px 14px; color: var(--muted); max-width: 68ch; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a { font: 500 13px var(--mono); text-decoration: none; color: var(--fg); border: 1px solid var(--line2); border-radius: 999px; padding: 5px 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--fg); color: var(--bg); outline: none; }
+/* SVG vocabulary */
+svg text { font-family: var(--body); fill: var(--fg); font-size: 13px; }
+svg .t { font-weight: 600; }
+svg .s { font-size: 11.5px; fill: var(--muted); }
+svg .m { font-family: var(--mono); font-size: 11.5px; }
+svg .h { paint-order: stroke; stroke: var(--surf); stroke-width: 5px; stroke-linejoin: round; }
+svg .c { text-anchor: middle; }
+svg .e { text-anchor: end; }
+svg .box { fill: var(--surf); stroke: var(--line2); stroke-width: 1.4; }
+svg .grp { fill: none; stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .b-client { fill: var(--client-t); stroke: var(--client); stroke-width: 1.5; }
+svg .b-master { fill: var(--master-t); stroke: var(--master); stroke-width: 1.5; }
+svg .b-ts { fill: var(--ts-t); stroke: var(--ts); stroke-width: 1.5; }
+svg .b-raft { fill: var(--raft-t); stroke: var(--raft); stroke-width: 1.5; }
+svg .b-disk { fill: var(--disk-t); stroke: var(--disk); stroke-width: 1.5; }
+svg .solid-ts { fill: var(--ts); stroke: var(--ts); }
+svg .solid-ts + text, svg text.on { fill: var(--surf); }
+svg .ln { fill: none; stroke: currentColor; stroke-width: 1.5; }
+svg .ln-r { fill: none; stroke: var(--raft); stroke-width: 1.6; stroke-dasharray: 6 4; }
+svg .ln-d { fill: none; stroke: var(--line2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+svg .life { stroke: var(--line2); stroke-width: 1.2; stroke-dasharray: 3 5; }
+</style>
+
+<main>
+  <header class="prose">
+    <span class="eyebrow">Learning Kudu · Part 5</span>
+    <h1>Tracing one write</h1>
+    <p class="lede">Parts 1 to 4 explained the pieces. This part uses them all. We follow a single <code>INSERT</code> from your application call to the row sitting in a MemRowSet on three servers, and name the thread, the lock and the source function at every step.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#map">The whole trace</a><a href="#client">Client</a><a href="#message">The message</a><a href="#gates">Gates</a><a href="#driver">OpDriver</a><a href="#prepare">Prepare</a><a href="#replicate">Replicate</a><a href="#apply">Apply</a><a href="#commit">Commit</a><a href="#follower">Followers</a><a href="#fail">Failures</a><a href="#src">Source map</a>
+    </nav>
+  </header>
+
+  <section id="map">
+    <h2>The whole trace on one page</h2>
+    <div class="prose">
+      <p>The example is one row written to the <code>metrics</code> table from Part 3: key <code>(host, time)</code>, one nullable <code>cpu</code> column. The row is <code>('web-3', 1735689600, 0.42)</code>. Hashing <code>host</code> puts it in bucket 1, and the time falls in the first range, so it belongs to tablet T1, whose leader is on tablet server TS-2.</p>
+      <p>Thirteen steps run on seven kinds of thread. A call never stays on one thread for long: each hand-off is a queue, and each queue is a place where a busy server pushes back.</p>
+    </div>
+    <figure>
+      <div class="frame">
+<svg viewBox="0 0 980 640" role="img" aria-label="Swimlane of one insert across application, client reactor, server reactor, service worker, prepare, Raft and apply threads in 13 numbered steps.">
+<defs><marker id="e1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+<rect class="b-client" x="10" y="30" width="960" height="40" rx="5" style="fill-opacity:.35"/>
+<text class="t" x="22" y="54">Application thread</text>
+<rect class="b-client" x="10" y="80" width="960" height="40" rx="5" style="fill-opacity:.35"/>
+<text class="t" x="22" y="104">Client reactor</text>
+<rect class="b-ts" x="10" y="130" width="960" height="40" rx="5" style="fill-opacity:.35"/>
+<text class="t" x="22" y="154">Server reactor</text>
+<rect class="b-master" x="10" y="180" width="960" height="40" rx="5" style="fill-opacity:.35"/>
+<text class="t" x="22" y="204">Service worker</text>
+<rect class="b-master" x="10" y="230" width="960" height="40" rx="5" style="fill-opacity:.35"/>
+<text class="t" x="22" y="254">Prepare thread (1 per tablet)</text>
+<rect class="b-raft" x="10" y="280" width="960" height="40" rx="5" style="fill-opacity:.35"/>
+<text class="t" x="22" y="304">Raft + WAL threads</text>
+<rect class="b-ts" x="10" y="330" width="960" height="40" rx="5" style="fill-opacity:.35"/>
+<text class="t" x="22" y="354">Apply pool thread</text>
+<path class="ln" marker-end="url(#e1)" d="M343 50 H 363"/>
+<path class="ln" marker-end="url(#e1)" d="M390 50 H 424 V 86"/>
+<path class="ln" marker-end="url(#e1)" d="M437 100 H 471 V 136"/>
+<path class="ln" marker-end="url(#e1)" d="M484 150 H 518 V 186"/>
+<path class="ln" marker-end="url(#e1)" d="M531 200 H 565 V 236"/>
+<path class="ln" marker-end="url(#e1)" d="M578 250 H 598"/>
+<path class="ln" marker-end="url(#e1)" d="M625 250 H 659 V 286"/>
+<path class="ln" marker-end="url(#e1)" d="M672 300 H 692"/>
+<path class="ln" marker-end="url(#e1)" d="M719 300 H 753 V 336"/>
+<path class="ln" marker-end="url(#e1)" d="M766 350 H 786"/>
+<path class="ln" marker-end="url(#e1)" d="M813 350 H 847 V 164"/>
+<path class="ln" marker-end="url(#e1)" d="M860 150 H 894 V 114"/>
+<circle cx="330" cy="50" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="330" y="54" style="font-size:12px">1</text>
+<circle cx="377" cy="50" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="377" y="54" style="font-size:12px">2</text>
+<circle cx="424" cy="100" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="424" y="104" style="font-size:12px">3</text>
+<circle cx="471" cy="150" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="471" y="154" style="font-size:12px">4</text>
+<circle cx="518" cy="200" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="518" y="204" style="font-size:12px">5</text>
+<circle cx="565" cy="250" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="565" y="254" style="font-size:12px">6</text>
+<circle cx="612" cy="250" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="612" y="254" style="font-size:12px">7</text>
+<circle cx="659" cy="300" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="659" y="304" style="font-size:12px">8</text>
+<circle cx="706" cy="300" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="706" y="304" style="font-size:12px">9</text>
+<circle cx="753" cy="350" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="753" y="354" style="font-size:12px">10</text>
+<circle cx="800" cy="350" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="800" y="354" style="font-size:12px">11</text>
+<circle cx="847" cy="150" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="847" y="154" style="font-size:12px">12</text>
+<circle cx="894" cy="100" r="13" fill="var(--surf)" stroke="currentColor" stroke-width="1.6"/>
+<text class="t c" x="894" y="104" style="font-size:12px">13</text>
+<text class="s" x="20" y="430"><tspan class="t" style="fill:var(--fg)">1</tspan>  session.Apply(insert), Batcher.Add, MetaCache: key → tablet T1, leader TS-2</text>
+<text class="s" x="20" y="456"><tspan class="t" style="fill:var(--fg)">2</tspan>  flush: group ops by tablet, encode RowOperationsPB, WriteRpc to the leader</text>
+<text class="s" x="20" y="482"><tspan class="t" style="fill:var(--fg)">3</tspan>  client reactor writes the request frame to the socket</text>
+<text class="s" x="20" y="508"><tspan class="t" style="fill:var(--fg)">4</tspan>  server reactor reads the frame, queues the call for the tablet service pool</text>
+<text class="s" x="20" y="534"><tspan class="t" style="fill:var(--fg)">5</tspan>  TabletServiceImpl::Write: gates, WriteOpState, TabletReplica::SubmitWrite</text>
+<text class="s" x="20" y="560"><tspan class="t" style="fill:var(--fg)">6</tspan>  WriteOp::Prepare: decode rows, check partition, take row locks</text>
+<text class="s" x="20" y="586"><tspan class="t" style="fill:var(--fg)">7</tspan>  assign timestamp, start the MVCC op, consensus Replicate()</text>
+<text class="s" x="510" y="430"><tspan class="t" style="fill:var(--fg)">8</tspan>  append to the leader WAL; UpdateConsensus to followers in parallel</text>
+<text class="s" x="510" y="456"><tspan class="t" style="fill:var(--fg)">9</tspan>  majority has it: commit index moves, OpDriver::ReplicationFinished</text>
+<text class="s" x="510" y="482"><tspan class="t" style="fill:var(--fg)">10</tspan>  WriteOp::Apply: probe for the key, insert into the MemRowSet</text>
+<text class="s" x="510" y="508"><tspan class="t" style="fill:var(--fg)">11</tspan>  enqueue CommitMsg, MVCC FinishApplying, release locks, RespondSuccess</text>
+<text class="s" x="510" y="534"><tspan class="t" style="fill:var(--fg)">12</tspan>  server reactor writes the response frame</text>
+<text class="s" x="510" y="560"><tspan class="t" style="fill:var(--fg)">13</tspan>  client reactor matches call_id; Batcher callback fires, your code resumes</text>
+<text class="s" x="20" y="410" style="font-weight:600">THE 13 STEPS</text>
+</svg>
+      </div>
+      <figcaption>Reading across the lanes: steps 1 to 3 and 13 are the client library, 4 to 12 are the server. Besides the client-to-leader hop, only steps 8 and 9 involve other machines. Everything else is local work, which is why a healthy write costs one network round trip to the leader plus one to the nearest follower.</figcaption>
+    </figure>
+  </section>
+
+  <section id="client">
+    <h2>Steps 1 to 3: the client builds the request</h2>
+    <div class="prose">
+      <p>The application hands a row to a <code>KuduSession</code>. The session gives it to a <code>Batcher</code>, which has two jobs: find which tablet owns each row, and bundle rows for the same tablet into one RPC. The flush mode decides when the bundle leaves.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 440" role="img" aria-label="Client side: a row is encoded into a partition key, looked up in the MetaCache, buffered per tablet, sent in one WriteRpc to the leader, and retried on leader errors.">
+        <defs><marker id="e2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-client" x="20" y="20" width="200" height="86" rx="6"/><text class="t" x="32" y="42">session.Apply(insert)</text><text class="s" x="32" y="62">row: web-3, 1735689600,</text><text class="s" x="32" y="78">cpu 0.42. Batcher::Add</text><text class="s" x="32" y="94">creates an InFlightOp.</text>
+        <rect class="b-client" x="260" y="20" width="230" height="86" rx="6"/><text class="t" x="272" y="42">Encode the partition key</text><text class="s" x="272" y="62">hash(host) mod 3 = 1</text><text class="s" x="272" y="78">+ range part from time</text><text class="s" x="272" y="94">→ one byte string</text>
+        <rect class="b-ts" x="530" y="20" width="200" height="86" rx="6"/><text class="t" x="542" y="42">MetaCache lookup</text><text class="s" x="542" y="62">key → RemoteTablet T1</text><text class="s" x="542" y="78">with replicas and leader</text><text class="s" x="542" y="94">from a local cache</text>
+        <rect class="b-master" x="770" y="20" width="190" height="86" rx="6"/><text class="t" x="782" y="42">Cache miss?</text><text class="s" x="782" y="62">ask the master:</text><text class="s" x="782" y="78">GetTableLocations (Part 3),</text><text class="s" x="782" y="94">then retry the lookup</text>
+        <path class="ln" marker-end="url(#e2)" d="M220 63 H 258"/><path class="ln" marker-end="url(#e2)" d="M490 63 H 528"/><path class="ln-d" marker-end="url(#e2)" d="M730 63 H 768"/>
+
+        <rect class="b-disk" x="20" y="150" width="300" height="90" rx="6"/><text class="t" x="32" y="172">Per-tablet buffer</text><text class="s" x="32" y="192">ops for T1 wait here, kept in the</text><text class="s" x="32" y="208">order the application applied them,</text><text class="s" x="32" y="224">so a later update never overtakes an insert</text>
+        <rect class="b-client" x="360" y="150" width="260" height="90" rx="6"/><text class="t" x="372" y="172">Flush</text><text class="s" x="372" y="192">when the mode says so and every</text><text class="s" x="372" y="208">lookup is done, one WriteRpc per</text><text class="s" x="372" y="224">tablet is created</text>
+        <rect class="b-raft" x="660" y="150" width="300" height="90" rx="6"/><text class="t" x="672" y="172">WriteRpc to the leader replica</text><text class="s" x="672" y="192">a RetriableRpc: a server picker tries</text><text class="s" x="672" y="208">the known leader first, other replicas</text><text class="s" x="672" y="224">if that fails</text>
+        <path class="ln" d="M850 106 V 128 H 170 V 148" style="display:none"/>
+        <path class="ln" marker-end="url(#e2)" d="M630 106 C 630 130, 200 120, 200 148"/><path class="ln" marker-end="url(#e2)" d="M320 195 H 358"/><path class="ln" marker-end="url(#e2)" d="M620 195 H 658"/>
+
+        <rect class="grp" x="20" y="272" width="450" height="150" rx="8"/><text class="t" x="34" y="296">Flush modes</text>
+        <text class="m" x="34" y="320">AUTO_FLUSH_SYNC</text><text class="s" x="190" y="320">each Apply sends at once and waits (default)</text>
+        <text class="m" x="34" y="346">AUTO_FLUSH_BACKGROUND</text><text class="s" x="190" y="362">buffer, send on an interval or when full;</text><text class="s" x="190" y="376">errors come back later</text>
+        <text class="m" x="34" y="402">MANUAL_FLUSH</text><text class="s" x="190" y="402">nothing leaves until you call Flush()</text>
+        <rect class="grp" x="500" y="272" width="460" height="150" rx="8"/><text class="t" x="514" y="296">When the response comes back</text>
+        <text class="s" x="514" y="320">· per-row errors (duplicate key, not found) are attached to the</text><text class="s" x="514" y="336">  rows they belong to; the batch itself still succeeded</text>
+        <text class="s" x="514" y="358">· NOT_THE_LEADER, TABLET_NOT_FOUND, connection failure: mark</text><text class="s" x="514" y="374">  that replica bad, refresh locations, retry another replica</text>
+        <text class="s" x="514" y="396">· the reply carries a timestamp, stored as the client's latest</text><text class="s" x="514" y="412">  observed time and sent on the next write</text>
+      </svg>
+      </div>
+      <figcaption>Batching is the main lever on write throughput. One RPC with 1,000 rows pays the network, queueing and consensus costs once, where 1,000 single-row RPCs pay them 1,000 times. The cost of a bigger batch is that one slow or failing row decision is only known when the whole response returns.</figcaption>
+    </figure>
+  </section>
+
+  <section id="message">
+    <h2>What is in the request</h2>
+    <div class="prose">
+      <p>The request is a <code>WriteRequestPB</code>. Its rows are not protobuf fields but one compact byte string, <code>RowOperationsPB.rows</code>, so that the server can decode thousands of rows without allocating an object per cell. Variable-length values such as strings sit in a second buffer.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 450" role="img" aria-label="WriteRequestPB fields, and the byte layout of one INSERT row with operation type, isset bitmap, null bitmap, fixed-width columns and a string stored in the indirect data buffer.">
+        <defs><marker id="e3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-master" x="20" y="20" width="300" height="270" rx="6"/><text class="t" x="34" y="44">WriteRequestPB</text>
+        <text class="m" x="34" y="72">tablet_id</text><text class="s" x="150" y="72">T1's id</text>
+        <text class="m" x="34" y="98">schema</text><text class="s" x="150" y="98">client's columns, no ids</text>
+        <text class="m" x="34" y="124">row_operations</text><text class="s" x="150" y="124">rows + indirect_data</text>
+        <text class="m" x="34" y="150">external_</text><text class="m" x="34" y="166">consistency_mode</text><text class="s" x="190" y="166">CLIENT_PROPAGATED</text>
+        <text class="m" x="34" y="192">propagated_timestamp</text><text class="s" x="34" y="208">the client's latest observed time</text>
+        <text class="m" x="34" y="234">authz_token</text><text class="s" x="150" y="234">table privileges</text>
+        <text class="m" x="34" y="260">txn_id</text><text class="s" x="150" y="260">only for multi-tablet txns</text>
+        <path class="ln" marker-end="url(#e3)" d="M320 124 H 380"/>
+
+        <text class="s" x="380" y="30">row_operations.rows: ONE INSERT ROW (columns: host STRING key, time INT64 key, cpu FLOAT nullable)</text>
+        <g>
+          <rect class="b-client" x="380" y="44" width="70" height="60" rx="3"/><text class="t c" x="415" y="68">op</text><text class="m c" x="415" y="86">0x01</text><text class="s c" x="415" y="99">INSERT</text>
+          <rect class="b-disk" x="450" y="44" width="76" height="60" rx="3"/><text class="t c" x="488" y="68">isset</text><text class="m c" x="488" y="86">0b111</text><text class="s c" x="488" y="99">3 columns set</text>
+          <rect class="b-disk" x="526" y="44" width="76" height="60" rx="3"/><text class="t c" x="564" y="68">null</text><text class="m c" x="564" y="86">0b000</text><text class="s c" x="564" y="99">none null</text>
+          <rect class="b-ts" x="602" y="44" width="110" height="60" rx="3"/><text class="t c" x="657" y="68">host</text><text class="m c" x="657" y="86">off 0, len 5</text><text class="s c" x="657" y="99">points into indirect</text>
+          <rect class="b-ts" x="712" y="44" width="110" height="60" rx="3"/><text class="t c" x="767" y="68">time</text><text class="m c" x="767" y="86">1735689600</text><text class="s c" x="767" y="99">8 bytes</text>
+          <rect class="b-ts" x="822" y="44" width="80" height="60" rx="3"/><text class="t c" x="862" y="68">cpu</text><text class="m c" x="862" y="86">0.42</text><text class="s c" x="862" y="99">4 bytes</text>
+        </g>
+        <text class="s" x="380" y="196">indirect_data:</text>
+        <rect class="b-ts" x="602" y="170" width="110" height="34" rx="3"/><text class="m c" x="657" y="192">web-3</text>
+        <path class="ln-d" marker-end="url(#e3)" d="M657 104 V 168"/>
+        <text class="s" x="380" y="236">The next operation starts right after, with no padding. An UPDATE has the same shape: its isset bitmap names the</text>
+        <text class="s" x="380" y="252">key columns and the columns to change. A DELETE sets only the key columns.</text>
+
+        <text class="t" x="380" y="292">Operation types in the enum</text>
+        <text class="m" x="380" y="314">INSERT · UPDATE · DELETE · UPSERT</text>
+        <text class="m" x="380" y="334">INSERT_IGNORE · UPDATE_IGNORE · DELETE_IGNORE · UPSERT_IGNORE</text>
+        <text class="s" x="380" y="358">The IGNORE variants turn "already exists" or "not found" into a silent success</text>
+        <text class="s" x="380" y="374">instead of a per-row error.</text>
+        <rect class="b-raft" x="20" y="318" width="330" height="104" rx="6"/><text class="t" x="34" y="342">Why a custom encoding?</text><text class="s" x="34" y="362">The server can read cells straight out of the</text><text class="s" x="34" y="378">buffer, validate by bitmaps, and copy rows into</text><text class="s" x="34" y="394">the MemRowSet without building per-row protobufs.</text><text class="s" x="34" y="410">The same buffer is later stored in the WAL.</text>
+      </svg>
+      </div>
+      <figcaption>The client sends its own schema, without column ids, because it may be older than the tablet's. The server maps client columns to its own by name and fills defaults, so a client built before an <code>ADD COLUMN</code> still works.</figcaption>
+    </figure>
+  </section>
+
+  <section id="gates">
+    <h2>Step 5: the gates in front of the tablet</h2>
+    <div class="prose">
+      <p>A service worker picks up the call and runs <code>TabletServiceImpl::Write</code>. Before it commits any server resources to the write, it runs a series of cheap checks. Each can refuse the request. The client treats most refusals as "try again soon, perhaps elsewhere".</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 600" role="img" aria-label="Sequence of checks in TabletServiceImpl::Write, each with its rejection, ending in SubmitWrite.">
+        <defs><marker id="e4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <g>
+          <rect class="b-master" x="20" y="14" width="440" height="46" rx="5"/><text class="t" x="32" y="34">① Find the replica, and it is running</text><text class="s" x="32" y="52">LookupRunningTabletReplicaOrRespond</text>
+          <rect class="b-master" x="20" y="76" width="440" height="46" rx="5"/><text class="t" x="32" y="96">② Does the authz token allow this write?</text><text class="s" x="32" y="114">table id matches; insert, update, delete privileges listed</text>
+          <rect class="b-master" x="20" y="138" width="440" height="46" rx="5"/><text class="t" x="32" y="158">③ Does the clock support the requested mode?</text><text class="s" x="32" y="176">COMMIT_WAIT needs a clock with a known error bound</text>
+          <rect class="b-master" x="20" y="200" width="440" height="46" rx="5"/><text class="t" x="32" y="220">④ Is the tablet open?</text><text class="s" x="32" y="238">GetTabletRef: not bootstrapping, not stopped</text>
+          <rect class="b-master" x="20" y="262" width="440" height="46" rx="5"/><text class="t" x="32" y="282">⑤ Is the tablet over its write quota?</text><text class="s" x="32" y="300">ShouldThrottleAllow(bytes), if a throttle is configured</text>
+          <rect class="b-master" x="20" y="324" width="440" height="46" rx="5"/><text class="t" x="32" y="344">⑥ Is the server past its soft memory limit?</text><text class="s" x="32" y="362">process_memory::SoftLimitExceeded</text>
+          <rect class="b-master" x="20" y="386" width="440" height="46" rx="5"/><text class="t" x="32" y="406">⑦ Is the apply queue overloaded?</text><text class="s" x="32" y="424">reject at random, more likely the longer the queue has waited</text>
+          <rect class="b-ts" x="20" y="448" width="440" height="58" rx="5"/><text class="t" x="32" y="468">⑧ Build WriteOpState, merge the client's timestamp</text><text class="s" x="32" y="486">clock.Update(propagated_timestamp) so this server's time is</text><text class="s" x="32" y="500">never behind anything the client has already seen</text>
+          <rect class="b-ts" x="20" y="522" width="440" height="52" rx="5"/><text class="t" x="32" y="542">⑨ replica.SubmitWrite(op_state, deadline)</text><text class="s" x="32" y="560">creates the WriteOp and an OpDriver; returns immediately</text>
+        </g>
+        <path class="ln" marker-end="url(#e4)" d="M240 60 V74"/><path class="ln" marker-end="url(#e4)" d="M240 122 V136"/><path class="ln" marker-end="url(#e4)" d="M240 184 V198"/><path class="ln" marker-end="url(#e4)" d="M240 246 V260"/><path class="ln" marker-end="url(#e4)" d="M240 308 V322"/><path class="ln" marker-end="url(#e4)" d="M240 370 V384"/><path class="ln" marker-end="url(#e4)" d="M240 432 V446"/><path class="ln" marker-end="url(#e4)" d="M240 506 V520"/>
+
+        <text class="t" x="520" y="34">What the client sees on refusal</text>
+        <rect class="b-raft" x="520" y="46" width="440" height="30" rx="4"/><text class="s" x="532" y="66">① TABLET_NOT_FOUND or not running: try another replica, refresh locations</text>
+        <rect class="b-raft" x="520" y="92" width="440" height="30" rx="4"/><text class="s" x="532" y="112">② NOT_AUTHORIZED: fail the write, no retry</text>
+        <rect class="b-raft" x="520" y="138" width="440" height="30" rx="4"/><text class="s" x="532" y="158">③ UNKNOWN_ERROR with NotSupported: fail the write</text>
+        <rect class="b-raft" x="520" y="170" width="440" height="30" rx="4"/><text class="s" x="532" y="190">④ TABLET_NOT_RUNNING or similar: same as ①</text>
+        <rect class="b-client" x="520" y="214" width="440" height="30" rx="4"/><text class="s" x="532" y="234">⑤⑥⑦ THROTTLED (ServiceUnavailable): wait with backoff, then retry</text>
+        <text class="s" x="520" y="274">None of ⑤ to ⑦ has touched the WAL or any lock. A refused write costs</text>
+        <text class="s" x="520" y="292">almost nothing, which is the point: shed load before it becomes work.</text>
+        <rect class="b-disk" x="520" y="326" width="440" height="110" rx="6"/><text class="t" x="534" y="350">Back-pressure comes in layers</text><text class="s" x="534" y="372">1. Part 2's service queue (50 calls) refuses first, with ERROR_SERVER_TOO_BUSY.</text><text class="s" x="534" y="390">2. These gates refuse next, using memory and apply-queue signals.</text><text class="s" x="534" y="408">3. Later, consensus can refuse if the leader is not ready or is transferring.</text><text class="s" x="534" y="426">Clients treat all three as "slow down".</text>
+      </svg>
+      </div>
+      <figcaption>The ⑦ check is probabilistic on purpose. If it rejected everything above a threshold, all clients would back off and return together. Dropping some requests, with a higher chance the longer the queue has been stuck, smooths the load.</figcaption>
+    </figure>
+  </section>
+
+  <section id="driver">
+    <h2>The OpDriver: two tracks that meet</h2>
+    <div class="prose">
+      <p>From here on, an operation is owned by an <code>OpDriver</code>. The driver tracks two independent progress markers: has the operation been <strong>prepared</strong> locally, and has it been <strong>replicated</strong>? The operation is applied only when both are true. The same class drives leaders and followers. They differ only in the starting state.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 420" role="img" aria-label="The OpDriver has a prepare track and a replication track. Apply starts when both are complete. For a leader, replication starts after prepare; for a follower, the operation arrives already replicating.">
+        <defs><marker id="e5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="t" x="20" y="28">Prepare track</text>
+        <rect class="b-disk" x="20" y="40" width="170" height="56" rx="6"/><text class="t c" x="105" y="64">NOT_PREPARED</text><text class="s c" x="105" y="82">queued on prepare pool</text>
+        <rect class="b-ts" x="290" y="40" width="170" height="56" rx="6"/><text class="t c" x="375" y="64">PREPARED</text><text class="s c" x="375" y="82">locks held, rows decoded</text>
+        <path class="ln" marker-end="url(#e5)" d="M190 68 H 288"/><text class="s c" x="239" y="60">Prepare()</text>
+
+        <text class="t" x="20" y="152">Replication track</text>
+        <rect class="b-disk" x="20" y="164" width="170" height="56" rx="6"/><text class="t c" x="105" y="188">NOT_REPLICATING</text><text class="s c" x="105" y="206">leader only, at the start</text>
+        <rect class="b-raft" x="290" y="164" width="170" height="56" rx="6"/><text class="t c" x="375" y="188">REPLICATING</text><text class="s c" x="375" y="206">in the log, uncommitted</text>
+        <rect class="b-ts" x="600" y="164" width="170" height="56" rx="6"/><text class="t c" x="685" y="188">REPLICATED</text><text class="s c" x="685" y="206">commit index passed it</text>
+        <rect class="b-disk" x="600" y="244" width="170" height="44" rx="6" style="fill-opacity:.5"/><text class="t c" x="685" y="264">REPLICATION_FAILED</text><text class="s c" x="685" y="280">aborted by a new leader</text>
+        <path class="ln" marker-end="url(#e5)" d="M190 192 H 288"/><text class="s c" x="239" y="184">Replicate()</text>
+        <path class="ln" marker-end="url(#e5)" d="M460 192 H 598"/><text class="s c" x="529" y="184">ReplicationFinished()</text>
+        <path class="ln-r" marker-end="url(#e5)" d="M460 206 C 500 240, 540 266, 598 266"/>
+
+        <rect class="b-master" x="800" y="100" width="160" height="82" rx="8"/><text class="t c" x="880" y="126">ApplyAsync()</text><text class="s c" x="880" y="146">only when PREPARED</text><text class="s c" x="880" y="162">and REPLICATED</text>
+        <path class="ln" marker-end="url(#e5)" d="M460 68 C 640 68, 700 120, 798 130"/><path class="ln" marker-end="url(#e5)" d="M770 192 C 785 192, 785 160, 798 156"/>
+
+        <rect class="b-client" x="20" y="316" width="440" height="88" rx="6"/><text class="t" x="34" y="338">On the leader</text><text class="s" x="34" y="358">Prepare first, then take a timestamp, then Replicate. Replication</text><text class="s" x="34" y="374">finishes after Prepare, so apply starts right away.</text>
+        <rect class="b-ts" x="520" y="316" width="440" height="88" rx="6"/><text class="t" x="534" y="338">On a follower</text><text class="s" x="534" y="358">The op arrives already REPLICATING, with the leader's timestamp. The</text><text class="s" x="534" y="374">commit index can pass it before Prepare ends, so either track may</text><text class="s" x="534" y="390">finish last, and whichever does starts the apply.</text>
+      </svg>
+      </div>
+      <figcaption>Three thread pools are involved: a <strong>prepare</strong> pool where each tablet has a serial token (one operation prepares at a time), a <strong>Raft</strong> pool for consensus work, and an <strong>apply</strong> pool shared across tablets. Preparing in a strict order is what keeps lock order and timestamp order the same, as the next figure shows.</figcaption>
+    </figure>
+  </section>
+
+  <section id="prepare">
+    <h2>Step 6 and 7: Prepare, then a timestamp</h2>
+    <div class="prose">
+      <p><code>WriteOp::Prepare</code> turns bytes into row operations and takes locks. The driver then assigns the timestamp and calls Raft. The order matters: <strong>locks come before the timestamp.</strong></p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 540" role="img" aria-label="Prepare steps in order, and a comparison of taking a timestamp before the row lock, which can order versions wrongly, against Kudu's lock-then-timestamp order.">
+        <defs><marker id="e6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="t" x="20" y="24">WriteOp::Prepare, in order</text>
+        <g>
+          <rect class="b-master" x="20" y="36" width="420" height="52" rx="5"/><text class="t" x="32" y="56">Decode the client schema</text><text class="s" x="32" y="75">must not carry column ids; reject if it does</text>
+          <rect class="b-master" x="20" y="100" width="420" height="52" rx="5"/><text class="t" x="32" y="120">Tablet::DecodeWriteOperations</text><text class="s" x="32" y="139">take the schema lock (shared), map rows onto the tablet's schema</text>
+          <rect class="b-master" x="20" y="164" width="420" height="52" rx="5"/><text class="t" x="32" y="184">Check privileges</text><text class="s" x="32" y="203">each row op needs INSERT, UPDATE or DELETE on the token</text>
+          <rect class="b-master" x="20" y="228" width="420" height="52" rx="5"/><text class="t" x="32" y="248">Partition lock (try)</text><text class="s" x="32" y="267">orders this write against multi-tablet transaction commits</text>
+          <rect class="b-ts" x="20" y="292" width="420" height="64" rx="5"/><text class="t" x="32" y="312">Tablet::AcquireRowLocks</text><text class="s" x="32" y="331">per row: build the key probe, check the key belongs to this</text><text class="s" x="32" y="347">tablet's partition, then lock the key exclusively</text>
+          <rect class="b-client" x="20" y="368" width="420" height="52" rx="5"/><text class="t" x="32" y="388">OpDriver: AssignTimestamp</text><text class="s" x="32" y="407">HybridClock under the TimeManager lock; strictly increasing</text>
+          <rect class="b-client" x="20" y="432" width="420" height="52" rx="5"/><text class="t" x="32" y="452">WriteOp::Start, then Replicate</text><text class="s" x="32" y="471">registers an MVCC op at that timestamp; hands the op to Raft</text>
+        </g>
+        <path class="ln" marker-end="url(#e6)" d="M230 88 V98"/><path class="ln" marker-end="url(#e6)" d="M230 152 V162"/><path class="ln" marker-end="url(#e6)" d="M230 216 V226"/><path class="ln" marker-end="url(#e6)" d="M230 280 V290"/><path class="ln" marker-end="url(#e6)" d="M230 356 V366"/><path class="ln" marker-end="url(#e6)" d="M230 420 V430"/>
+
+        <text class="t" x="500" y="24">Why locks before the timestamp</text>
+        <rect class="b-raft" x="500" y="36" width="230" height="210" rx="6"/><text class="t" x="512" y="58">Timestamp first (wrong)</text>
+        <text class="s" x="512" y="80">T1 takes ts 10</text><text class="s" x="512" y="98">T2 takes ts 11</text><text class="s" x="512" y="116">T2 locks the row, updates it</text><text class="s" x="512" y="134">T2 releases the lock</text><text class="s" x="512" y="152">T1 locks the row, deletes it</text>
+        <text class="s" x="512" y="178">Row history: @11 UPDATE,</text><text class="s" x="512" y="194">then @10 DELETE.</text><text class="t" x="512" y="220" fill="var(--raft)">Versions out of order:</text><text class="s" x="512" y="236" fill="var(--raft)">replay would break.</text>
+        <rect class="b-ts" x="750" y="36" width="210" height="210" rx="6"/><text class="t" x="762" y="58">Lock first (Kudu)</text>
+        <text class="s" x="762" y="80">T1 locks the row</text><text class="s" x="762" y="98">T1 takes ts 10</text><text class="s" x="762" y="116">T2 waits for the lock</text><text class="s" x="762" y="134">T1 applies, unlocks</text><text class="s" x="762" y="152">T2 locks, takes ts 11</text>
+        <text class="s" x="762" y="178">Row history: @10 then @11.</text><text class="t" x="762" y="212" fill="var(--ts)">Lock order equals</text><text class="t" x="762" y="228" fill="var(--ts)">timestamp order.</text>
+        <rect class="b-disk" x="500" y="270" width="460" height="214" rx="6"/>
+        <text class="t" x="514" y="294">What the row locks protect</text>
+        <text class="s" x="514" y="316">Only one write at a time can touch a given primary key. Two inserts of the same</text><text class="s" x="514" y="332">key serialize here, and the second one will see the first in the presence check.</text>
+        <text class="s" x="514" y="358">Row locks are held until the very end (after commit), not just until replication.</text>
+        <text class="s" x="514" y="384">The prepare pool runs one op at a time per tablet, so ops reach Raft in the order</text><text class="s" x="514" y="400">they took their locks and timestamps. Parallelism comes from many tablets, and</text><text class="s" x="514" y="416">from batching many rows into each op.</text>
+        <text class="s" x="514" y="442">Followers do the same Prepare and take the same row locks, but they use the</text><text class="s" x="514" y="458">leader's timestamp instead of drawing a new one.</text>
+      </svg>
+      </div>
+      <figcaption>This is plain two-phase locking: the order in which locks are won is the serialization order. The rule is stated in a comment at the top of <code>tablet/ops/op_driver.h</code>. Making it hold by construction, with a serial prepare queue, avoids any need to sort timestamps afterwards.</figcaption>
+    </figure>
+  </section>
+
+  <section id="replicate">
+    <h2>Steps 8 and 9: replicate and wait</h2>
+    <div class="prose">
+      <p>This is Part 4 in one line. <code>Replicate</code> gives the operation an OpId such as <code>7.413</code>. The leader writes it to its WAL while sending <code>UpdateConsensus</code> to each follower. When the leader's own WAL write and one follower's acknowledgement are both in, the commit index passes 7.413. Raft's apply callback then calls <code>OpDriver::ReplicationFinished</code>, which moves the replication track to <code>REPLICATED</code> and submits the apply task.</p>
+      <p>What is stored in that log entry matters for step 10: the <strong>entire request</strong>, plus the leader's timestamp. Followers and crash recovery replay it from there.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 270" role="img" aria-label="The replicated log entry holds the OpId, the leader's timestamp, the operation type WRITE_OP, the original WriteRequestPB and the request id for exactly-once handling.">
+        <defs><marker id="e7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">THE REPLICATE ENTRY IN THE WAL</text>
+        <rect class="b-raft" x="20" y="34" width="120" height="70" rx="4"/><text class="t c" x="80" y="58">OpId</text><text class="m c" x="80" y="78">7.413</text><text class="s c" x="80" y="94">term.index</text>
+        <rect class="b-client" x="140" y="34" width="150" height="70" rx="4"/><text class="t c" x="215" y="58">timestamp</text><text class="s c" x="215" y="78">the leader's</text><text class="s c" x="215" y="94">hybrid time</text>
+        <rect class="b-disk" x="290" y="34" width="110" height="70" rx="4"/><text class="t c" x="345" y="58">op type</text><text class="m c" x="345" y="82">WRITE_OP</text>
+        <rect class="b-master" x="400" y="34" width="360" height="70" rx="4"/><text class="t c" x="580" y="58">write_request</text><text class="s c" x="580" y="78">the original WriteRequestPB: tablet id, client schema,</text><text class="s c" x="580" y="94">row_operations (all rows of the batch)</text>
+        <rect class="b-disk" x="760" y="34" width="200" height="70" rx="4"/><text class="t c" x="860" y="58">request_id</text><text class="s c" x="860" y="78">client id, seq no, attempt:</text><text class="s c" x="860" y="94">for exactly-once (Part 2)</text>
+        <text class="t" x="20" y="144">A second, later entry: the CommitMsg</text>
+        <rect class="b-ts" x="20" y="156" width="940" height="70" rx="4"/><text class="s" x="34" y="180">written after apply: committed OpId 7.413, plus one OperationResultPB per row. Each result says where the row went</text><text class="s" x="34" y="198">(which MemRowSet, or which delta store of which DiskRowSet) or what error it hit. After a crash, the tablet replays the WAL</text><text class="s" x="34" y="216">and uses these to skip changes that were already flushed to disk.</text>
+        <text class="s" x="20" y="256">All rows of one batch share one OpId, so a batch is applied atomically with respect to every scan and every other write.</text>
+      </svg>
+      </div>
+      <figcaption>One batch is one Raft operation. That makes a multi-row <code>Write</code> atomic <em>within a tablet</em>: either every row commits at the same timestamp or none does. Across tablets there is no such guarantee unless you use a multi-tablet transaction.</figcaption>
+    </figure>
+  </section>
+
+  <section id="apply">
+    <h2>Step 10: Apply, finally touching the data</h2>
+    <div class="prose">
+      <p>An apply-pool thread runs <code>WriteOp::Apply</code>, which calls <code>Tablet::ApplyRowOperations</code>. This is the first time any row reaches a store. The tablet first marks the MVCC op as <em>applying</em> and takes a consistent view of its components (the current MemRowSet and the set of DiskRowSets), then probes and writes.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 560" role="img" aria-label="Apply: mark MVCC applying and capture components, bulk check which rowset has each key, then per operation type: insert goes to MemRowSet unless the key exists; update and delete go to the rowset that has the key; upsert becomes an update if present.">
+        <defs><marker id="e8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-ts" x="20" y="14" width="460" height="64" rx="6"/><text class="t" x="34" y="36">① StartApplying</text><text class="s" x="34" y="56">MVCC op moves RESERVED → APPLYING; grab the components</text><text class="s" x="34" y="70">(MemRowSet + RowSetTree) under a short shared lock</text>
+        <rect class="b-master" x="20" y="98" width="460" height="104" rx="6"/><text class="t" x="34" y="120">② BulkCheckPresence</text><text class="s" x="34" y="140">sort the batch's keys and drop duplicates; then for each key ask only</text><text class="s" x="34" y="156">the rowsets whose key range can contain it (an interval tree).</text><text class="s" x="34" y="172">A DiskRowSet answers with its bloom filter first, and the primary-key</text><text class="s" x="34" y="188">index only if the filter says "maybe". Result: the rowset holding the key, or none.</text>
+        <rect class="b-disk" x="20" y="222" width="460" height="44" rx="6"/><text class="t" x="34" y="242">③ For each row, in order: ApplyRowOperation</text><text class="s" x="34" y="258">a failure on one row is recorded for that row; the others go on</text>
+        <path class="ln" marker-end="url(#e8)" d="M250 78 V96"/><path class="ln" marker-end="url(#e8)" d="M250 202 V220"/>
+
+        <rect class="b-client" x="20" y="296" width="220" height="132" rx="6"/><text class="t" x="34" y="318">INSERT</text><text class="s" x="34" y="338">key found anywhere?</text><text class="s" x="34" y="356">yes: per-row error</text><text class="m" x="34" y="372">AlreadyPresent</text><text class="s" x="34" y="394">no: MemRowSet::Insert</text><text class="s" x="34" y="412">at this op's timestamp</text>
+        <rect class="b-client" x="260" y="296" width="220" height="132" rx="6"/><text class="t" x="274" y="318">UPDATE / DELETE</text><text class="s" x="274" y="338">key found?</text><text class="s" x="274" y="356">no: per-row error</text><text class="m" x="274" y="372">NotFound</text><text class="s" x="274" y="394">yes: rowset.MutateRow</text><text class="s" x="274" y="412">adds a change at the timestamp</text>
+        <path class="ln" marker-end="url(#e8)" d="M130 266 V294"/><path class="ln" marker-end="url(#e8)" d="M370 266 V294"/>
+
+        <text class="t" x="520" y="34">Where the change lands</text>
+        <rect class="b-ts" x="520" y="46" width="440" height="82" rx="6"/><text class="t" x="534" y="68">New row → MemRowSet B-tree</text><text class="s" x="534" y="88">key encoded so byte order equals key order; value is a header</text><text class="s" x="534" y="104">(insert timestamp, change list) plus the row data. The WAL op index is</text><text class="s" x="534" y="120">anchored so the log segment is kept until this row is flushed.</text>
+        <rect class="b-ts" x="520" y="140" width="440" height="82" rx="6"/><text class="t" x="534" y="162">Change to a row still in the MemRowSet</text><text class="s" x="534" y="182">append a mutation (timestamp, change list) to that row's linked</text><text class="s" x="534" y="198">list. Readers walk the list and keep the changes their snapshot</text><text class="s" x="534" y="214">can see.</text>
+        <rect class="b-ts" x="520" y="234" width="440" height="82" rx="6"/><text class="t" x="534" y="256">Change to a row already on disk</text><text class="s" x="534" y="276">DiskRowSet finds the row's index, checks it is not already deleted,</text><text class="s" x="534" y="292">then DeltaTracker adds the change to the DeltaMemStore. Base files</text><text class="s" x="534" y="308">are never edited.</text>
+        <rect class="b-disk" x="520" y="328" width="440" height="100" rx="6"/><text class="t" x="534" y="350">UPSERT and the IGNORE variants</text><text class="s" x="534" y="370">UPSERT: if the key exists it becomes an UPDATE of the non-key</text><text class="s" x="534" y="386">columns that were set; otherwise an INSERT. *_IGNORE: the same</text><text class="s" x="534" y="402">checks, but "already present" or "not found" is recorded as</text><text class="s" x="534" y="418">ignored and is not an error.</text>
+        <rect class="b-raft" x="20" y="452" width="940" height="88" rx="6"/><text class="t" x="34" y="476">Why a bulk presence check?</text><text class="s" x="34" y="496">Checking each row separately would open the same rowsets and bloom filters over and over. Sorting the keys makes the probes walk the index forward, which</text><text class="s" x="34" y="512">is far kinder to caches and disks. A write of 1,000 sorted rows costs much less than 1,000 single-row writes, which is the second reason that batching pays.</text><text class="s" x="34" y="528">Counters such as bulk_check_batches_pre_sorted tell you whether your client already sends keys in order.</text>
+      </svg>
+      </div>
+      <figcaption>The insert's presence check is why Kudu cannot treat a primary-key insert as a blind append. Uniqueness is enforced on every write by looking in every rowset that could hold the key. Bloom filters keep this cheap for keys that do not exist, which is the common case for inserts.</figcaption>
+    </figure>
+
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 340" role="img" aria-label="After the insert, the MemRowSet B-tree has an entry for the key whose header holds the insertion timestamp and a list of later mutations. A later update appends a mutation.">
+        <defs><marker id="e9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <text class="s" x="20" y="22">THE ROW AFTER STEP 10, AND AFTER A LATER UPDATE (cpu = 0.55 at timestamp T2)</text>
+        <rect class="b-disk" x="20" y="40" width="270" height="74" rx="6"/><text class="t" x="34" y="62">MemRowSet B-tree (sorted)</text><text class="s" x="34" y="82">… · web-2 · <tspan class="t">web-3</tspan> · web-4 · …</text><text class="s" x="34" y="100">key = encoded (host, time)</text>
+        <path class="ln" marker-end="url(#e9)" d="M290 78 H 340"/>
+        <rect class="b-ts" x="342" y="40" width="618" height="74" rx="6"/>
+        <rect class="b-client" x="352" y="50" width="150" height="54" rx="4"/><text class="t c" x="427" y="72">insertion ts</text><text class="m c" x="427" y="90">T1 (op 7.413)</text>
+        <rect class="b-client" x="506" y="50" width="130" height="54" rx="4"/><text class="t c" x="571" y="72">redo head</text><text class="s c" x="571" y="90">→ first mutation</text>
+        <rect class="b-ts" x="640" y="50" width="310" height="54" rx="4"/><text class="t c" x="795" y="72">row data</text><text class="m c" x="795" y="90">web-3 · 1735689600 · 0.42</text>
+
+        <text class="t" x="20" y="152">Mutation list (a REDO log for this one row)</text>
+        <rect class="b-raft" x="342" y="164" width="300" height="70" rx="6"/><text class="t" x="356" y="186">Mutation @ T2</text><text class="m" x="356" y="206">set cpu = 0.55</text><text class="s" x="356" y="224">next → none</text>
+        <path class="ln" marker-end="url(#e9)" d="M571 104 C 571 130, 480 140, 480 162"/>
+        <rect class="b-disk" x="680" y="164" width="280" height="70" rx="6" style="fill-opacity:.5"/><text class="t" x="694" y="186">Later mutations (if any)</text><text class="s" x="694" y="206">DELETE @ T3, REINSERT @ T4 …</text><text class="s" x="694" y="224">appended atomically at the tail</text>
+        <path class="ln-d" marker-end="url(#e9)" d="M642 199 H 678"/>
+        <rect class="b-master" x="20" y="262" width="940" height="66" rx="6"/><text class="t" x="34" y="284">How a reader sees it</text><text class="s" x="34" y="304">A scan with snapshot S ignores a row if T1 is not in S. Otherwise it applies the mutations whose timestamps are in S, in order. A scan at a time between T1 and T2</text><text class="s" x="34" y="320">sees cpu = 0.42; a scan after T2 sees 0.55. When the MemRowSet is flushed, the base row and its changes are written to disk as base data and delta files.</text>
+      </svg>
+      </div>
+      <figcaption>The MemRowSet is a concurrent B-tree, so the apply thread and any number of scanners can use it at the same time without a table-wide lock. The row lock from Prepare is what stops two <em>writers</em> from appending to the same list at once.</figcaption>
+    </figure>
+  </section>
+
+  <section id="commit">
+    <h2>Steps 11 and 12: commit, release, answer</h2>
+    <div class="prose">
+      <p>The rows are in memory but nobody can see them yet. The driver now finishes in a precise order. The order is the reason readers never see half of a batch and writers never see stale rows.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 420" role="img" aria-label="Order of finishing: apply, enqueue CommitMsg in WAL, optional commit wait, MVCC FinishApplying makes rows visible, release locks, run the completion callback, which responds to the client with the timestamp.">
+        <defs><marker id="e10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <g>
+          <rect class="b-ts" x="20" y="20" width="176" height="104" rx="6"/><text class="t" x="32" y="42">① Apply done</text><text class="s" x="32" y="62">rows are in the</text><text class="s" x="32" y="78">stores, hidden by</text><text class="s" x="32" y="94">MVCC. Per-row</text><text class="s" x="32" y="110">results are ready.</text>
+          <rect class="b-raft" x="214" y="20" width="176" height="104" rx="6"/><text class="t" x="226" y="42">② CommitMsg to WAL</text><text class="s" x="226" y="62">asynchronous append,</text><text class="s" x="226" y="78">not waited on. Needed</text><text class="s" x="226" y="94">only for recovery.</text>
+          <rect class="b-client" x="408" y="20" width="176" height="104" rx="6"/><text class="t" x="420" y="42">③ Commit wait</text><text class="s" x="420" y="62">only for COMMIT_WAIT:</text><text class="s" x="420" y="78">sleep until the clock</text><text class="s" x="420" y="94">is past the timestamp</text><text class="s" x="420" y="110">plus its error bound.</text>
+          <rect class="b-master" x="602" y="20" width="176" height="104" rx="6"/><text class="t" x="614" y="42">④ MVCC finish</text><text class="s" x="614" y="62">FinishApplying: from</text><text class="s" x="614" y="78">this instant, every new</text><text class="s" x="614" y="94">snapshot includes the</text><text class="s" x="614" y="110">whole batch.</text>
+          <rect class="b-disk" x="796" y="20" width="164" height="104" rx="6"/><text class="t" x="808" y="42">⑤ Release locks</text><text class="s" x="808" y="62">row locks, partition</text><text class="s" x="808" y="78">lock, schema lock.</text><text class="s" x="808" y="94">Waiting writers on</text><text class="s" x="808" y="110">the same key proceed.</text>
+        </g>
+        <path class="ln" marker-end="url(#e10)" d="M196 72 H 212"/><path class="ln" marker-end="url(#e10)" d="M390 72 H 406"/><path class="ln" marker-end="url(#e10)" d="M584 72 H 600"/><path class="ln" marker-end="url(#e10)" d="M778 72 H 794"/>
+        <path class="ln" marker-end="url(#e10)" d="M880 124 V 150 H 130 V 172"/>
+        <rect class="b-ts" x="20" y="174" width="440" height="100" rx="6"/><text class="t" x="34" y="196">⑥ Completion callback → RpcContext::RespondSuccess</text><text class="s" x="34" y="216">WriteResponsePB: the op's timestamp, plus per_row_errors with the index</text><text class="s" x="34" y="232">of each failed row and its status. The rows that succeeded commit even if</text><text class="s" x="34" y="248">others in the same batch failed. The response is queued to the server</text><text class="s" x="34" y="264">reactor (step 12).</text>
+        <rect class="b-disk" x="500" y="174" width="460" height="100" rx="6"/><text class="t" x="514" y="196">⑦ Bookkeeping</text><text class="s" x="514" y="216">ResultTracker stores the response for retries with the same request id</text><text class="s" x="514" y="232">(Part 2); metrics are updated (rows inserted, replication time, write</text><text class="s" x="514" y="248">duration); the op tracker releases the driver. If it was the last write</text><text class="s" x="514" y="264">before a flush, the MemRowSet anchor now matters.</text>
+
+        <rect class="b-client" x="20" y="302" width="940" height="100" rx="6"/><text class="t" x="34" y="326">Why the locks wait until the MVCC finish</text><text class="s" x="34" y="346">If the row lock were released before the batch became visible, a second writer could take the lock, probe the rowsets, and not see this insert, which exists only as a hidden</text><text class="s" x="34" y="362">in-memory row. It would then wrongly accept a duplicate. Finishing MVCC first, then unlocking, means the next writer's presence check always sees a committed state.</text><text class="s" x="34" y="384">The returned timestamp goes into the client's "latest observed" time, so its next request carries it. That is what makes reads that follow writes see them (CLIENT_PROPAGATED).</text>
+      </svg>
+      </div>
+      <figcaption>Notice that the client's response does <em>not</em> wait for the CommitMsg to reach disk. The durable fact was the Raft replication in step 8 and 9. The CommitMsg only helps recovery skip work.</figcaption>
+    </figure>
+  </section>
+
+  <section id="follower">
+    <h2>Meanwhile on the followers</h2>
+    <div class="prose">
+      <p>The two followers run the same <code>WriteOp</code>, from a different entrance. They have no client and no RPC to answer, so they run fewer steps. They keep the leader's timestamp so that every replica ends up with identical MVCC histories.</p>
+    </div>
+    <figure>
+      <div class="frame">
+      <svg viewBox="0 0 980 520" role="img" aria-label="Leader and follower timelines for the same operation. The follower receives UpdateConsensus, starts a follower op, prepares, appends to its WAL, acks, and applies after the commit index reaches the op.">
+        <defs><marker id="e11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <rect class="b-ts" x="40" y="10" width="360" height="34" rx="6"/><text class="t c" x="220" y="32">Leader (TS-2)</text>
+        <rect class="b-master" x="580" y="10" width="360" height="34" rx="6"/><text class="t c" x="760" y="32">Follower (TS-1 or TS-4)</text>
+        <path class="life" d="M220 44 V510 M760 44 V510"/>
+
+        <rect class="b-disk" x="60" y="62" width="320" height="46" rx="5"/><text class="s" x="70" y="82">Prepare, timestamp T1, Replicate(7.413)</text><text class="s" x="70" y="98">(steps 6 and 7)</text>
+        <path class="ln" marker-end="url(#e11)" d="M220 130 H 758"/><text class="s h" x="230" y="122">UpdateConsensus(ops = [7.413], committed = 7.412)</text>
+        <rect class="b-raft" x="60" y="146" width="320" height="30" rx="5"/><text class="s" x="70" y="166">append 7.413 to the leader's WAL</text>
+        <rect class="b-master" x="600" y="146" width="320" height="76" rx="5"/><text class="s" x="610" y="166">StartFollowerOp: build a WriteOp from the entry</text><text class="s" x="610" y="182">timestamp = T1 from the message; MVCC op started;</text><text class="s" x="610" y="198">driver starts as REPLICATING; Prepare takes the same</text><text class="s" x="610" y="214">row locks as the leader did</text>
+        <rect class="b-raft" x="600" y="236" width="320" height="30" rx="5"/><text class="s" x="610" y="256">append 7.413 to the follower's WAL</text>
+        <path class="ln-d" marker-end="url(#e11)" d="M758 292 H 222"/><text class="s h" x="400" y="284">ack: last received = 7.413</text>
+        <rect class="b-ts" x="60" y="308" width="320" height="64" rx="5"/><text class="s" x="70" y="328">commit index reaches 7.413: ReplicationFinished,</text><text class="s" x="70" y="344">Apply, CommitMsg, MVCC finish, locks released,</text><text class="s" x="70" y="360">response to the client (steps 9 to 12)</text>
+        <path class="ln" marker-end="url(#e11)" d="M220 396 H 758"/><text class="s h" x="230" y="388">next UpdateConsensus carries committed = 7.413</text>
+        <rect class="b-ts" x="600" y="412" width="320" height="76" rx="5"/><text class="s" x="610" y="432">commit index passes 7.413: ReplicationFinished,</text><text class="s" x="610" y="448">Apply (same rows, same timestamp T1), MVCC finish,</text><text class="s" x="610" y="464">locks released. No client to answer; the response</text><text class="s" x="610" y="480">is cached for retries with the same request id.</text>
+      </svg>
+      </div>
+      <figcaption>A follower applies <em>after</em> the leader, by about one message. A read served by a follower at an older snapshot is still correct, because the follower's own MVCC state says exactly which writes it has finished. Kudu's default scans go to the leader and are read-your-writes. Follower reads need a snapshot timestamp, and the follower waits until its safe time has caught up.</figcaption>
+    </figure>
+  </section>
+
+  <section id="fail">
+    <h2>What can go wrong, and where</h2>
+    <div class="prose">
+      <p>A good way to remember the path is to ask what each stage can fail on, and what the client does.</p>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Stage</th><th>Failure</th><th>Client sees</th><th>What happens next</th></tr></thead>
+        <tbody>
+          <tr><td>Lookup (1)</td><td>No tablet covers the key</td><td>NotFound for the row</td><td>The row is outside every range partition; add a range first</td></tr>
+          <tr><td>Service queue (4)</td><td>Queue full</td><td>ERROR_SERVER_TOO_BUSY</td><td>Backoff and retry</td></tr>
+          <tr><td>Gates (5)</td><td>Throttled, memory, apply backlog</td><td>THROTTLED</td><td>Backoff and retry, nothing was written</td></tr>
+          <tr><td>Prepare (6)</td><td>Schema mismatch, bad row, key not in partition</td><td>per-row error, or whole-batch error</td><td>Fix the data; retries will fail the same way</td></tr>
+          <tr><td>Prepare queue</td><td>Deadline passed while waiting</td><td>TimedOut</td><td>Retry if the application still wants the write</td></tr>
+          <tr><td>Replicate (7 to 9)</td><td>Not the leader, or leader lost leadership mid-write</td><td>NOT_THE_LEADER or timeout</td><td>Retry on the new leader; the request id prevents a double apply</td></tr>
+          <tr><td>Apply (10)</td><td>Duplicate key on INSERT, missing key on UPDATE</td><td>per-row AlreadyPresent or NotFound</td><td>Other rows in the batch still commit</td></tr>
+          <tr><td>Response (12)</td><td>Response lost on the network</td><td>timeout</td><td>Retry with the same request id; the server returns the stored result</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Metric (per tablet)</th><th>Measures</th></tr></thead>
+        <tbody>
+          <tr><td><code>op_prepare_queue_time</code></td><td>Time spent waiting for the prepare thread; high means a hot tablet</td></tr>
+          <tr><td><code>op_prepare_run_time</code></td><td>Time in Prepare itself, including waiting for row locks</td></tr>
+          <tr><td><code>replication_duration</code></td><td>Replicate() until the commit index passed: network and disk of the Raft group</td></tr>
+          <tr><td><code>write_op_duration_client_propagated_consistency</code></td><td>Total time inside the tablet for the default mode</td></tr>
+          <tr><td><code>rows_inserted</code>, <code>insertions_failed_dup_key</code></td><td>Counts of successes and duplicate-key errors</td></tr>
+          <tr><td><code>bulk_check_batches_pre_sorted</code> / <code>_needed_sort</code></td><td>Whether clients send keys in order</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Reading a slow write: compare <code>op_prepare_queue_time</code> (waiting on this tablet), <code>replication_duration</code> (the group's disks and network) and the service queue time from Part 2 (the server as a whole). Whichever one is large says which layer to look at first. The web UI's <code>/rpcz</code> shows in-flight calls and the <code>/tablets</code> page links each replica's metrics.</p>
+  </section>
+
+  <section id="src">
+    <h2>Where to find each step</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Step</th><th>Function</th><th>File (in <code>src/kudu/</code>)</th></tr></thead>
+        <tbody>
+          <tr><td>1 to 2</td><td><code>Batcher::Add</code>, <code>TabletLookupFinished</code>, <code>FlushBuffer</code></td><td><code>client/batcher.cc</code></td></tr>
+          <tr><td>2</td><td><code>WriteRpc</code> (request building, retries)</td><td><code>client/batcher.cc</code></td></tr>
+          <tr><td>5</td><td><code>TabletServiceImpl::Write</code></td><td><code>tserver/tablet_service.cc</code></td></tr>
+          <tr><td>5</td><td><code>TabletReplica::SubmitWrite</code></td><td><code>tablet/tablet_replica.cc</code></td></tr>
+          <tr><td>5 to 11</td><td><code>OpDriver::ExecuteAsync</code>, <code>Prepare</code>, <code>ReplicationFinished</code>, <code>ApplyTask</code></td><td><code>tablet/ops/op_driver.cc</code></td></tr>
+          <tr><td>6</td><td><code>WriteOp::Prepare</code></td><td><code>tablet/ops/write_op.cc</code></td></tr>
+          <tr><td>6</td><td><code>Tablet::DecodeWriteOperations</code>, <code>AcquireRowLocks</code></td><td><code>tablet/tablet.cc</code></td></tr>
+          <tr><td>6</td><td><code>LockManager</code></td><td><code>tablet/lock_manager.cc</code></td></tr>
+          <tr><td>7</td><td><code>TimeManager::AssignTimestamp</code></td><td><code>consensus/time_manager.cc</code></td></tr>
+          <tr><td>7 to 9</td><td><code>RaftConsensus::Replicate</code>, <code>PeerMessageQueue</code></td><td><code>consensus/raft_consensus.cc</code>, <code>consensus_queue.cc</code></td></tr>
+          <tr><td>10</td><td><code>Tablet::ApplyRowOperations</code>, <code>BulkCheckPresence</code>, <code>InsertOrUpsertUnlocked</code>, <code>MutateRowUnlocked</code></td><td><code>tablet/tablet.cc</code></td></tr>
+          <tr><td>10</td><td><code>MemRowSet::Insert</code>, <code>MutateRow</code></td><td><code>tablet/memrowset.cc</code></td></tr>
+          <tr><td>10</td><td><code>DiskRowSet::CheckRowPresent</code>, <code>MutateRow</code></td><td><code>tablet/diskrowset.cc</code></td></tr>
+          <tr><td>10 to 11</td><td><code>MvccManager</code>, <code>ScopedOp</code></td><td><code>tablet/mvcc.cc</code></td></tr>
+          <tr><td>11</td><td><code>WriteOp::Apply</code>, <code>Finish</code>; <code>WriteOpState</code></td><td><code>tablet/ops/write_op.cc</code></td></tr>
+          <tr><td>follower</td><td><code>TabletReplica::StartFollowerOp</code></td><td><code>tablet/tablet_replica.cc</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>A good exercise: build the tests, run <code>tablet_server-test</code> under a debugger with a breakpoint in <code>WriteOp::Prepare</code>, and step through the server half of the 13 steps. <code>tablet/ops/op_driver.h</code> has the best written explanation of ordering, and the traces under <code>/rpcz</code> show the TRACE markers named in this part (<code>PREPARE: starting</code>, <code>REPLICATION: finished</code>, <code>APPLY: finished</code>).</p>
+      <p><strong>That completes the architecture series.</strong> The natural next topics are the storage engine under the MemRowSet (flush, compaction and the on-disk format), scans and MVCC snapshots, and the Java client and Spark integration.</p>
+    </div>
+  </section>
+</main>
